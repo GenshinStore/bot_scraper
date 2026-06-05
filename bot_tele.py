@@ -461,7 +461,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         if user_client.is_connected():
             await user_client.disconnect()
         
-        return stop_reason_code, processed_ids_this_run
+        return stop_reason_code, processed_ids_this_run, stats
 
 async def scrape_group_members(user_client, group_entity):
     """Scrape anggota dari satu grup."""
@@ -971,6 +971,10 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
     globally_processed_ids = set()
     is_first_run = True
+    total_stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
+    accounts_used = []
+    start_time = datetime.now()
+
 
     for i, session_name in enumerate(session_names):
         session_name = session_name.strip() # Hapus spasi
@@ -983,6 +987,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         if not is_first_run:
             await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
         is_first_run = False
+        accounts_used.append(session_name)
 
         session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
         if not session_path.exists():
@@ -1010,7 +1015,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
                 await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
                 continue
             else:
-                await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan.")
+                await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
                 return
         elif stop_reason == 'error':
             if i < len(session_names) - 1:
@@ -1019,6 +1024,24 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
             else:
                 await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
                 return
+    
+    # Kirim laporan akhir gabungan setelah semua proses selesai
+    elapsed_time = datetime.now() - start_time
+    final_summary_text = (
+        f"📊 **--- Laporan Akhir Gabungan ---** 📊\n\n"
+        f"**Akun yang Digunakan:** {', '.join(f'`{s}`' for s in accounts_used)}\n\n"
+        f"--- **Hasil Total** ---\n"
+        f"✅ **Berhasil Ditambahkan:** {total_stats['added']}\n"
+        f"🔗 **Link Terkirim:** {total_stats['link_sent']}\n"
+        f"⏩ **Dilewati (Privasi):** {total_stats['skipped_privacy']}\n"
+        f"👥 **Sudah Jadi Anggota:** {total_stats['already_member']}\n"
+        f"❌ **Gagal:** {total_stats['failed']} (termasuk bot, error, & limit)\n\n"
+        f"⏱️ **Total Durasi Seluruh Tugas:** {str(elapsed_time).split('.')[0]}"
+    )
+    try:
+        await event.reply(final_summary_text)
+    except Exception as e:
+        print(f"[ERROR] Gagal mengirim laporan akhir gabungan: {e}")
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrup (\S+) (.+)'))
 async def addgrup_handler(event):
