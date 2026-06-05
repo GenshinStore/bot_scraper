@@ -557,6 +557,18 @@ async def run_single_group_scraping(event, user_client, session_name, target_str
             await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Pastikan akun `{session_name}` adalah anggota grup tersebut. Error: {e}")
             return
 
+        # Fitur Baru: Coba bergabung ke grup/channel secara otomatis.
+        # Ini akan gagal jika grup privat atau chat biasa, dan itu tidak masalah.
+        # Jika sudah menjadi anggota, tidak akan terjadi apa-apa.
+        try:
+            from telethon.tl.functions.channels import JoinChannelRequest
+            await user_client(JoinChannelRequest(target_entity))
+            await status_message.edit(f"✅ Akun `{session_name}` mencoba bergabung/memastikan keanggotaan di **{target_entity.title}**...")
+            await asyncio.sleep(2) # Jeda singkat agar status terbaca
+        except Exception:
+            # Abaikan error di sini (misal: jika ini grup dasar/chat privat), proses scraping akan tetap dicoba.
+            pass
+
         # 2. Lakukan scraping
         await status_message.edit(f"🔄 Scraping... Sedang memproses: **{target_entity.title}**")
         
