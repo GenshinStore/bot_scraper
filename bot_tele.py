@@ -124,7 +124,7 @@ async def send_group_link(user_client, user_id, user_username, target_entity, cu
     except Exception as e:
         return False, f"Error kirim link: {e}"
 
-async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None):
+async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default'):
     """Fungsi utama untuk menjalankan proses broadcast/add member."""
     TASK_STATE[session_name] = {
         "running": True,
@@ -132,7 +132,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         "stop_requested": False,
     }
 
-    stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0}
+    stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
     history_log = []
     start_time = datetime.now()
     status_message = await event.reply(f"Memulai proses broadcast dengan akun `{session_name}`...")
@@ -159,7 +159,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         # PENGECEKAN BARU: Jika grupnya privat, link undangan wajib ada.
         # Ini mencegah bot berjalan sia-sia jika konfigurasi salah.
         is_private_group = not hasattr(target_entity, 'username') or not target_entity.username
-        if is_private_group and not invite_link:
+        if is_private_group and not invite_link and mode == 'default':
             await event.reply(
                 f"❌ **Kesalahan Konfigurasi!**\n\n"
                 f"Grup target **{target_entity.title}** adalah grup **privat**. "
@@ -297,19 +297,26 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                         status_code = "added"
                         status_detail = "Successfully added to group."
                     elif "privasi" in reason.lower() or "cannot cast" in reason.lower():
-                        # Jika gagal karena privasi (atau error lama 'cannot cast'), coba kirim link
-                        link_success, link_reason = await send_group_link(user_client, uid, username, target_entity, invite_link) # type: ignore
-                        if link_success:
-                            stats['link_sent'] += 1
-                            last_status_text = f"🔗 {current_user_display}: Gagal tambah (privasi/grup dasar), link undangan terkirim."
-                            sleep_after_action = True
-                            status_code = "link_sent"
-                            status_detail = "Could not add due to privacy, sent invite link."
+                        # Mode 'fast' akan melewati user dengan privasi, mode 'default' akan mencoba kirim link.
+                        if mode == 'fast':
+                            stats['skipped_privacy'] += 1
+                            last_status_text = f"⏩ {current_user_display}: Dilewati (akun privat)."
+                            status_code = "skipped_privacy"
+                            status_detail = "User skipped due to privacy settings (fast mode)."
                         else:
-                            stats['failed'] += 1
-                            last_status_text = f"❌ {current_user_display}: Gagal tambah & gagal kirim link ({link_reason})."
-                            status_code = "failed"
-                            status_detail = f"Failed to add (privacy) and failed to send link: {link_reason}"
+                            # Jika gagal karena privasi (atau error lama 'cannot cast'), coba kirim link
+                            link_success, link_reason = await send_group_link(user_client, uid, username, target_entity, invite_link) # type: ignore
+                            if link_success:
+                                stats['link_sent'] += 1
+                                last_status_text = f"🔗 {current_user_display}: Gagal tambah (privasi/grup dasar), link undangan terkirim."
+                                sleep_after_action = True
+                                status_code = "link_sent"
+                                status_detail = "Could not add due to privacy, sent invite link."
+                            else:
+                                stats['failed'] += 1
+                                last_status_text = f"❌ {current_user_display}: Gagal tambah & gagal kirim link ({link_reason})."
+                                status_code = "failed"
+                                status_detail = f"Failed to add (privacy) and failed to send link: {link_reason}"
                     elif "sudah menjadi anggota" in reason.lower():
                         stats['already_member'] += 1
                         last_status_text = f"👥 {current_user_display}: Sudah menjadi anggota."
@@ -369,6 +376,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 f"--- **Statistik Total** ---\n"
                 f"✅ **Berhasil Ditambahkan:** {stats['added']}\n"
                 f"🔗 **Link Terkirim:** {stats['link_sent']}\n"
+                f"⏩ **Dilewati (Privasi):** {stats['skipped_privacy']}\n"
                 f"👥 **Sudah Jadi Anggota:** {stats['already_member']}\n"
                 f"❌ **Gagal:** {stats['failed']} (termasuk bot & error)\n\n"
                 f"⏱️ **Durasi:** {str(elapsed_time).split('.')[0]}"
@@ -391,6 +399,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             f"**Total User Diproses:** {stats['processed']}\n"
             f"✅ **Berhasil Ditambahkan:** {stats['added']}\n"
             f"🔗 **Link Terkirim:** {stats['link_sent']}\n"
+            f"⏩ **Dilewati (Privasi):** {stats['skipped_privacy']}\n"
             f"👥 **Sudah Jadi Anggota:** {stats['already_member']}\n"
             f"❌ **Gagal:** {stats['failed']} (termasuk bot & error)\n\n"
             f"⏱️ **Total Durasi:** {str(datetime.now() - start_time).split('.')[0]}"
@@ -689,6 +698,10 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Contoh:* `/addgrup akun1 @grupkeren 10`
 *Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC...`
 
+` /addgrupfast <nama_sesi> <target> <jeda_menit> `
+*Fungsi:* Sama seperti /addgrup, tapi **melewati** anggota dengan akun privat (tidak mengirim link). Berguna untuk menambah anggota secara cepat.
+*Contoh:* `/addgrupfast akun1 @grupkeren 5`
+
 ` /addgrupexcel <nama_sesi> <target> <jeda_menit> [link_opsional] `
 *Fungsi:* Menambah anggota dengan mengunggah file Excel manual.
 *Contoh:* `/addgrupexcel akun1 @grupkeren 10`
@@ -976,6 +989,34 @@ async def addgrup_handler(event):
         return
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link))
+
+@bot_client.on(events.NewMessage(pattern=r'/addgrupfast (\w+) (.+)'))
+async def addgrupfast_handler(event):
+    print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
+    session_name = event.pattern_match.group(1)
+    if TASK_STATE.get(session_name, {}).get("running"):
+        await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
+        return
+
+    # Parse args, mode ini tidak butuh link undangan
+    args = event.pattern_match.group(2).split()
+    if len(args) != 2:
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupfast <nama_sesi> <target> <jeda_menit>`\n\nLihat /help untuk detail.")
+        return
+
+    try:
+        target_str = args[0]
+        delay_minutes = int(args[1])
+    except ValueError:
+        await event.reply("❌ **Format Salah!**\n`<jeda_menit>` harus berupa angka.")
+        return
+
+    session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
+    if not session_path.exists():
+        await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Gunakan `/login {session_name}` atau periksa daftar dengan `/accounts`.")
+        return
+    user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+    asyncio.create_task(run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link=None, mode='fast'))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (\w+) (.+)'))
 async def addgrupexcel_handler(event):
