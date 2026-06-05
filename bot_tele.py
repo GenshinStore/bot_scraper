@@ -154,6 +154,18 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Error: {e}")
             return
 
+        # PENGECEKAN BARU: Jika grupnya privat, link undangan wajib ada.
+        # Ini mencegah bot berjalan sia-sia jika konfigurasi salah.
+        is_private_group = not hasattr(target_entity, 'username') or not target_entity.username
+        if is_private_group and not invite_link:
+            await event.reply(
+                f"❌ **Kesalahan Konfigurasi!**\n\n"
+                f"Grup target **{target_entity.title}** adalah grup **privat**. "
+                f"Untuk mengirim undangan ke anggota yang membatasi privasi, Anda **wajib** menyertakan link undangan di dalam perintah.\n\n"
+                f"Contoh: `/addgrup {session_name} {target_str} {delay_minutes} https://t.me/joinchat/LINK_ANDA`"
+            )
+            return
+
         # Pre-fetch existing members to avoid re-adding
         await status_message.edit(f"⏳ Mengambil daftar anggota yang sudah ada di grup **{target_entity.title}**...\nIni bisa memakan waktu untuk grup besar.")
         existing_member_ids = set()

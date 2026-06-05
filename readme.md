@@ -11,3 +11,5 @@ source venv/bin/activate
 
 # Instal requirement
 pip install -r requirements.txt
+
+pm2 start bot_tele.py --name "bot-scraper" --interpreter $(which python3)
