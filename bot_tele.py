@@ -529,6 +529,84 @@ async def run_scraping(event, user_client, session_name):
         if user_client.is_connected():
             await user_client.disconnect()
 
+async def run_single_group_scraping(event, user_client, session_name, target_str):
+    """Fungsi utama untuk menjalankan proses scraping dari satu grup spesifik."""
+    TASK_STATE[session_name] = {
+        "running": True,
+        "task_name": "scrapegrup",
+        "stop_requested": False,
+    }
+
+    status_message = await event.reply(f"Memulai proses scraping grup tunggal dengan akun `{session_name}`...")
+    start_time = datetime.now()
+
+    try:
+        await user_client.connect()
+        if not await user_client.is_user_authorized():
+            await event.reply(f"❌ Gagal otorisasi dengan akun `{session_name}`. Mungkin perlu login ulang.")
+            return
+
+        # 1. Dapatkan entitas grup target
+        try:
+            try:
+                target_id = int(target_str)
+                target_entity = await user_client.get_entity(target_id)
+            except ValueError:
+                target_entity = await user_client.get_entity(target_str)
+        except (ValueError, TypeError, Exception) as e:
+            await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Pastikan akun `{session_name}` adalah anggota grup tersebut. Error: {e}")
+            return
+
+        # 2. Lakukan scraping
+        await status_message.edit(f"🔄 Scraping... Sedang memproses: **{target_entity.title}**")
+        
+        success, members_dict = await scrape_group_members(user_client, target_entity)
+
+        if not success or not members_dict:
+            await event.reply(f"❌ Gagal melakukan scrape anggota dari grup **{target_entity.title}**. Kemungkinan anggota grup tersembunyi atau tidak ada akses.")
+            return
+
+        # 3. Simpan hasil ke file Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Scraped Members"
+        ws.append(['group_id', 'group_title', 'uid', 'username', 'name'])
+
+        for uid, user in members_dict.items():
+            ws.append([target_entity.id, target_entity.title, uid, user.username or 'N/A', user.first_name or '(No Name)'])
+
+        safe_group_title = "".join(c for c in target_entity.title if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
+        output_file = f"hasil_scraper_{session_name}_{safe_group_title}.xlsx"
+        wb.save(output_file)
+
+        # 4. Kirim ringkasan dan file ke user
+        total_members = len(members_dict)
+        elapsed_time = datetime.now() - start_time
+        summary_text = (
+            f"🏁 **Scraping Grup Selesai!**\n\n"
+            f"**Grup Target:** {target_entity.title}\n"
+            f"👥 **Total Anggota Unik Ditemukan:** {total_members}\n\n"
+            f"⏱️ **Durasi:** {str(elapsed_time).split('.')[0]}\n\n"
+            f"Laporan lengkap disimpan dalam file Excel `{output_file}`."
+        )
+        await event.client.send_file(
+            event.chat_id,
+            output_file,
+            caption=summary_text,
+            reply_to=event.message.id,
+            force_document=True,
+            attributes=[DocumentAttributeFilename(file_name=os.path.basename(output_file))]
+        )
+
+    except Exception as e:
+        await event.reply(f"❌ Terjadi error saat scraping dengan `{session_name}`:\n`{e}`")
+        traceback.print_exc()
+    finally:
+        if session_name in TASK_STATE:
+            del TASK_STATE[session_name]
+        if user_client.is_connected():
+            await user_client.disconnect()
+
 # =====================================================
 # BOT EVENT HANDLERS
 # =====================================================
@@ -556,6 +634,11 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ` /scraper <nama_sesi> `
 *Fungsi:* Scrape anggota dari semua grup di akun target.
 *Contoh:* `/scraper akun1`
+
+` /scrapegrup <nama_sesi> <target_grup> `
+*Fungsi:* Scrape anggota dari satu grup spesifik.
+*Contoh 1:* `/scrapegrup akun1 @grupkeren`
+*Contoh 2:* `/scrapegrup akun1 -100123456789`
 
 ` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] `
 *Fungsi:* Menambah anggota dari file scrape terakhir.
@@ -796,6 +879,24 @@ async def scraper_handler(event):
         return
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_scraping(event, user_client, session_name))
+
+@bot_client.on(events.NewMessage(pattern=r'/scrapegrup (\w+) (.+)'))
+async def scrapegrup_handler(event):
+    print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
+    session_name = event.pattern_match.group(1)
+    target_str = event.pattern_match.group(2)
+
+    if TASK_STATE.get(session_name, {}).get("running"):
+        await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
+        return
+        
+    session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
+    if not session_path.exists():
+        await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Gunakan `/login {session_name}` atau periksa daftar dengan `/accounts`.")
+        return
+        
+    user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+    asyncio.create_task(run_single_group_scraping(event, user_client, session_name, target_str))
 
 async def _parse_add_args(event, command_name):
     """Helper untuk mem-parsing argumen untuk /addgrup dan /addgrupexcel."""
