@@ -395,7 +395,9 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 pass
 
             # Jeda sebelum memproses user berikutnya
-            if sleep_after_action and i < total_users:
+            # PERUBAHAN: Jeda utama (delay_minutes) kini diterapkan setelah SETIAP user diproses,
+            # bukan hanya setelah aksi yang berhasil.
+            if i < total_users: # Jangan jeda setelah user terakhir.
                 await status_message.edit(summary_text + f"\n\n**Jeda {delay_minutes} menit...**")
                 await asyncio.sleep(delay_minutes * 60)
 
