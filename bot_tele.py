@@ -71,6 +71,8 @@ async def add_user_to_group(user_client, target_group, user_id):
         else:
             return False, "Tipe grup tidak didukung"
 
+    except FloodWaitError as e:
+        return False, f"FLOOD_WAIT:{e.seconds}"
     except RPCError as e:
         error_msg = str(e).lower()
         if "user_already_participant" in error_msg:
@@ -315,8 +317,23 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                         status_code = "already_member"
                         status_detail = "User already in group (API response)."
                     else:
-                        # Pengecekan khusus untuk error "Too many requests"
-                        if "too many requests" in reason.lower():
+                        # Pengecekan untuk error limit dari Telegram yang harus menghentikan proses
+                        if reason.startswith("FLOOD_WAIT:"):
+                            try:
+                                wait_seconds = int(reason.split(":")[1])
+                                wait_duration_str = str(timedelta(seconds=wait_seconds))
+                                await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI (FLOOD WAIT)!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama **{wait_duration_str}**.")
+                                status_detail = f"Telegram flood wait limit hit ({wait_seconds}s)."
+                            except (IndexError, ValueError):
+                                await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI (FLOOD WAIT)!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
+                                status_detail = "Telegram flood wait limit hit (unknown duration)."
+                            
+                            TASK_STATE[session_name]["stop_requested"] = True
+                            last_status_text = f"🛑 {current_user_display}: Gagal (LIMIT FLOOD WAIT)."
+                            stats['failed'] += 1
+                            status_code = "failed"
+                        
+                        elif "too many requests" in reason.lower():
                             await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
                             TASK_STATE[session_name]["stop_requested"] = True # Memicu penghentian loop
                             last_status_text = f"🛑 {current_user_display}: Gagal (LIMIT TERCAPAI)."
