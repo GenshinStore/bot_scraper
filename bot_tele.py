@@ -699,14 +699,13 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ` /scraper <nama_sesi> `
 *Fungsi:* Scrape anggota dari semua grup di akun target.
 *Contoh:* `/scraper akun1`
-
-` /scrapegrup <nama_sesi> <target_grup> `
+` /scrapergrup <nama_sesi> <target_grup> `
 *Fungsi:* Scrape anggota dari satu grup spesifik.
-*Contoh 1:* `/scrapegrup akun1 @grupkeren`
-*Contoh 2:* `/scrapegrup akun1 -100123456789`
+*Contoh 1:* `/scrapergrup akun1 @grupkeren`
+*Contoh 2:* `/scrapergrup akun1 -100123456789`
 
 ` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] `
-*Fungsi:* Menambah anggota dari file scrape **terbaru** untuk sesi tersebut (hasil dari /scraper atau /scrapegrup).
+*Fungsi:* Menambah anggota dari file scrape **terbaru** untuk sesi tersebut (hasil dari /scraper atau /scrapergrup).
 *Contoh:* `/addgrup akun1 @grupkeren 10`
 *Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC...`
 
@@ -949,8 +948,8 @@ async def scraper_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_scraping(event, user_client, session_name))
 
-@bot_client.on(events.NewMessage(pattern=r'/scrapegrup (\w+) (.+)'))
-async def scrapegrup_handler(event):
+@bot_client.on(events.NewMessage(pattern=r'/scrapergrup (\w+) (.+)'))
+async def scrapergrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     session_name = event.pattern_match.group(1)
     target_str = event.pattern_match.group(2)
