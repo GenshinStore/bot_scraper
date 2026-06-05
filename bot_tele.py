@@ -81,6 +81,8 @@ async def add_user_to_group(user_client, target_group, user_id):
             return False, "Privasi user membatasi penambahan"
         elif "users_too_much" in error_msg: # Error saat akun sudah terlalu banyak mengundang
             return False, "Akun telah mencapai limit undangan"
+        elif "banned from sending messages" in error_msg:
+            return False, "BANNED_IN_SUPERGROUP"
         else:
             return False, f"Gagal menambahkan: {e}"
     except Exception as e:
@@ -346,6 +348,12 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                             
                             stop_reason_code = 'flood_wait'
                             break # Hentikan loop untuk akun ini, akan dilanjutkan oleh akun lain
+                        elif reason == "BANNED_IN_SUPERGROUP":
+                            await event.reply(f"🛑 **AKUN DI-BAN DARI GRUP!**\n\nAkun `{session_name}` sepertinya telah di-ban atau dibatasi untuk menambahkan anggota di grup target. Proses untuk akun ini dihentikan.\n\n**Rekomendasi:** Coba gunakan akun lain atau periksa status akun `{session_name}` secara manual.")
+                            stats['failed'] += 1
+                            status_detail = "Account is banned from inviting in the target group."
+                            stop_reason_code = 'banned'
+                            break # Hentikan loop untuk akun ini
                         elif "too many requests" in reason.lower():
                             await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
                             TASK_STATE[session_name]["stop_requested"] = True # Memicu penghentian loop
@@ -1011,12 +1019,18 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         elif stop_reason == 'stopped_by_user':
             await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
             return
-        elif stop_reason == 'flood_wait':
+        elif stop_reason == 'flood_wait' or stop_reason == 'banned':
             if i < len(session_names) - 1:
-                await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
+                if stop_reason == 'flood_wait':
+                    await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
+                else: # banned
+                    await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup. Beralih ke akun berikutnya...")
                 continue
             else:
-                await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
+                if stop_reason == 'flood_wait':
+                    await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
+                else: # banned
+                    await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga di-ban. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
                 return
         elif stop_reason == 'error':
             if i < len(session_names) - 1:
