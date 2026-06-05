@@ -19,8 +19,11 @@ from telethon.tl.types import Channel, Chat, User, DocumentAttributeFilename
 load_dotenv()
 
 # =====================================================
-# KONFIGURASI
+# KONFIGURASI PATH & DASAR
 # =====================================================
+# Dapatkan direktori tempat skrip ini berada untuk path yang andal
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -29,22 +32,24 @@ ADMIN_ID_STR = os.getenv("ADMIN_ID")
 # Anda bisa mendapatkan ID Anda dari bot seperti @userinfobot
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR and ADMIN_ID_STR.isdigit() else 0
 
-SESSIONS_DIR = "sessions"
-BOT_SESSION = "bot_session"
+SESSIONS_DIR = SCRIPT_DIR / "sessions"
+BOT_SESSION_NAME = "bot_session" # Hanya nama, bukan path
+BOT_SESSION_PATH = str(SESSIONS_DIR / BOT_SESSION_NAME)
 
 # Pastikan direktori sesi ada
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 # Hapus session lama jika ada untuk force fresh login
-if os.path.exists(f"{BOT_SESSION}.session"):
+bot_session_file = f"{BOT_SESSION_PATH}.session"
+if os.path.exists(bot_session_file):
     try:
-        os.remove(f"{BOT_SESSION}.session")
+        os.remove(bot_session_file)
         print("[INFO] Old bot session cleared for fresh login.")
     except Exception as e:
         print(f"[WARNING] Tidak bisa menghapus session lama: {e}")
 
 # Klien bot utama
-bot_client = TelegramClient(BOT_SESSION, API_ID, API_HASH)
+bot_client = TelegramClient(BOT_SESSION_PATH, API_ID, API_HASH)
 
 # =====================================================
 # STATUS GLOBAL
@@ -199,13 +204,19 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             # LOGIKA BARU: Untuk /addgrup, cari file scrape TERBARU yang cocok dengan nama sesi.
             # Ini memungkinkan penggunaan hasil dari /scraper dan /scrapegrup secara mulus.
             try:
-                search_pattern = f"hasil_scraper_{session_name}*.xlsx"
+                # Menggunakan r'' untuk raw string, sesuai permintaan, dan mencari di direktori skrip.
+                search_pattern = rf"hasil_scraper_{session_name}*.xlsx"
                 
-                # Dapatkan daftar file beserta waktu modifikasinya
-                files = [(p, p.stat().st_mtime) for p in Path(".").glob(search_pattern)]
+                # Dapatkan daftar file beserta waktu modifikasinya dari direktori skrip
+                files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
                 
                 if not files:
-                    await event.reply(f"❌ Tidak ada file hasil scrape yang ditemukan untuk sesi `{session_name}`. Jalankan `/scraper {session_name}` atau `/scrapegrup {session_name} <target>` terlebih dahulu.")
+                    await event.reply(
+                        f"❌ **File Scrape Tidak Ditemukan!**\n\n"
+                        f"Saya tidak dapat menemukan file hasil scrape untuk sesi `{session_name}`.\n"
+                        f"Pastikan Anda telah menjalankan `/scraper {session_name}` atau `/scrapergrup {session_name} <target>` terlebih dahulu.\n\n"
+                        f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
+                    )
                     return
 
                 # Urutkan file berdasarkan waktu modifikasi (terbaru dulu) dan ambil yang paling atas
@@ -432,8 +443,9 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         processed_ids_this_run = {log.get("user_id") for log in history_log}
 
         if history_log:
-            os.makedirs("history", exist_ok=True)
-            history_file = f"history/broadcast_history_{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            history_dir = SCRIPT_DIR / "history"
+            os.makedirs(history_dir, exist_ok=True)
+            history_file = history_dir / f"broadcast_history_{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             
             # Buat file Excel
             wb_history = Workbook()
@@ -461,7 +473,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                     history_file,
                     caption=f"📝 Log riwayat untuk proses broadcast `{session_name}`.",
                     reply_to=event.message.id,
-                    attributes=[DocumentAttributeFilename(file_name=os.path.basename(history_file))]
+                    attributes=[DocumentAttributeFilename(file_name=Path(history_file).name)]
                 )
             except Exception as e:
                 print(f"[WARNING] Gagal mengirim file riwayat ke user: {e}")
@@ -559,7 +571,7 @@ async def run_scraping(event, user_client, session_name):
                     seen_uids.add(uid)
 
         # Nama file output sesuai dengan nama sesi untuk memudahkan identifikasi dan menimpa file lama.
-        output_file = f"hasil_scraper_{session_name}.xlsx"
+        output_file = SCRIPT_DIR / f"hasil_scraper_{session_name}.xlsx"
         wb.save(output_file)
 
         # Kirim ringkasan dan file ke user
@@ -579,7 +591,7 @@ async def run_scraping(event, user_client, session_name):
             caption=summary_text,
             reply_to=event.message.id,
             force_document=True,
-            attributes=[DocumentAttributeFilename(file_name=os.path.basename(output_file))]
+            attributes=[DocumentAttributeFilename(file_name=Path(output_file).name)]
         )
         # os.remove(output_file) # File tidak lagi dihapus dan akan tersimpan di server/lokal.
 
@@ -651,7 +663,7 @@ async def run_single_group_scraping(event, user_client, session_name, target_str
             ws.append([target_entity.id, target_entity.title, uid, user.username or 'N/A', user.first_name or '(No Name)'])
 
         safe_group_title = "".join(c for c in target_entity.title if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
-        output_file = f"hasil_scraper_{session_name}_{safe_group_title}.xlsx"
+        output_file = SCRIPT_DIR / f"hasil_scraper_{session_name}_{safe_group_title}.xlsx"
         wb.save(output_file)
 
         # 4. Kirim ringkasan dan file ke user
@@ -670,7 +682,7 @@ async def run_single_group_scraping(event, user_client, session_name, target_str
             caption=summary_text,
             reply_to=event.message.id,
             force_document=True,
-            attributes=[DocumentAttributeFilename(file_name=os.path.basename(output_file))]
+            attributes=[DocumentAttributeFilename(file_name=Path(output_file).name)]
         )
 
     except Exception as e:
@@ -976,7 +988,7 @@ async def scrapergrup_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_single_group_scraping(event, user_client, session_name, target_str))
 
-async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None):
+async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None):
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
     globally_processed_ids = set()
     is_first_run = True
@@ -1005,13 +1017,18 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
 
         user_client = TelegramClient(str(session_path), API_ID, API_HASH)
         
-        stop_reason, processed_this_run = await run_broadcast(
+        stop_reason, processed_this_run, stats_this_run = await run_broadcast(
             event, user_client, session_name, target_str, delay_minutes, 
             invite_link, excel_file_path=excel_file_path, mode=mode, 
             skip_user_ids=globally_processed_ids
         )
 
-        globally_processed_ids.update(processed_this_run)
+        if processed_this_run:
+            globally_processed_ids.update(processed_this_run)
+        
+        if stats_this_run:
+            for key in total_stats:
+                total_stats[key] += stats_this_run.get(key, 0)
 
         if stop_reason == 'completed':
             await event.reply(f"🎉 Semua proses selesai dengan sukses menggunakan akun `{session_name}`.")
@@ -1054,67 +1071,99 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         f"⏱️ **Total Durasi Seluruh Tugas:** {str(elapsed_time).split('.')[0]}"
     )
     try:
-        await event.reply(final_summary_text)
+        await event.reply(final_summary_text, reply_to=start_message_id)
     except Exception as e:
         print(f"[ERROR] Gagal mengirim laporan akhir gabungan: {e}")
 
-@bot_client.on(events.NewMessage(pattern=r'/addgrup (\S+) (.+)'))
+@bot_client.on(events.NewMessage(pattern=r'/addgrup (.*)'))
 async def addgrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_names_str = event.pattern_match.group(1)
-    session_names = [s.strip() for s in session_names_str.split(',')]
-    
-    args = event.pattern_match.group(2).split()
-    if not (2 <= len(args) <= 3):
+    args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
+
+    if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrup <sesi> <target> <jeda> [link]`")
         return
     
-    target_str, delay_minutes_str, invite_link = args[0], args[1], args[2] if len(args) == 3 else None
+    # Cek apakah argumen terakhir adalah link
+    if len(args) >= 4 and (args[-1].startswith('http://') or args[-1].startswith('https://')):
+        invite_link = args[-1]
+        delay_minutes_str = args[-2]
+        target_str = args[-3]
+        session_names_str = " ".join(args[:-3])
+    else:
+        invite_link = None
+        delay_minutes_str = args[-1]
+        target_str = args[-2]
+        session_names_str = " ".join(args[:-2])
+
     try:
         delay_minutes = int(delay_minutes_str)
     except ValueError:
         await event.reply("❌ `<jeda_menit>` harus berupa angka.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default'))
+    session_names = [s.strip() for s in session_names_str.split(',') if s.strip()]
+    if not session_names:
+        await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
+        return
 
-@bot_client.on(events.NewMessage(pattern=r'/addgrupfast (\S+) (.+)'))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id))
+
+@bot_client.on(events.NewMessage(pattern=r'/addgrupfast (.*)'))
 async def addgrupfast_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_names_str = event.pattern_match.group(1)
-    session_names = [s.strip() for s in session_names_str.split(',')]
+    args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
-    # Parse args, mode ini tidak butuh link undangan
-    args = event.pattern_match.group(2).split()
-    if len(args) != 2:
+    if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupfast <nama_sesi> <target> <jeda_menit>`\n\nLihat /help untuk detail.")
         return
 
     try:
-        target_str = args[0]
-        delay_minutes = int(args[1])
+        delay_minutes = int(args[-1])
     except ValueError:
         await event.reply("❌ **Format Salah!**\n`<jeda_menit>` harus berupa angka.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast'))
+    target_str = args[-2]
+    session_names_str = " ".join(args[:-2])
+    session_names = [s.strip() for s in session_names_str.split(',') if s.strip()]
 
-@bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (\S+) (.+)'))
+    if not session_names:
+        await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
+        return
+
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id))
+
+@bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (.*)'))
 async def addgrupexcel_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_names_str = event.pattern_match.group(1)
-    session_names = [s.strip() for s in session_names_str.split(',')]
+    args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
-    args = event.pattern_match.group(2).split()
-    if not (2 <= len(args) <= 3):
+    if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupexcel <sesi> <target> <jeda> [link]`")
         return
     
-    target_str, delay_minutes_str, invite_link = args[0], args[1], args[2] if len(args) == 3 else None
+    # Cek apakah argumen terakhir adalah link
+    if len(args) >= 4 and (args[-1].startswith('http://') or args[-1].startswith('https://')):
+        invite_link = args[-1]
+        delay_minutes_str = args[-2]
+        target_str = args[-3]
+        session_names_str = " ".join(args[:-3])
+    else:
+        invite_link = None
+        delay_minutes_str = args[-1]
+        target_str = args[-2]
+        session_names_str = " ".join(args[:-2])
+
     try:
         delay_minutes = int(delay_minutes_str)
     except ValueError:
         await event.reply("❌ `<jeda_menit>` harus berupa angka.")
+        return
+
+    session_names = [s.strip() for s in session_names_str.split(',') if s.strip()]
+    if not session_names:
+        await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
     try:
@@ -1131,14 +1180,14 @@ async def addgrupexcel_handler(event):
             # Simpan file yang diunggah dengan nama sesi untuk konsistensi
             # Gunakan nama sesi pertama untuk nama file
             first_session = session_names[0] if session_names else "pool"
-            download_path = f"manual_upload_{first_session}_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx"
+            download_path = SCRIPT_DIR / f"manual_upload_{first_session}_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx"
             await conv.send_message(f"⏳ Mengunduh file `{file_name or 'file.xlsx'}`...")
             await bot_client.download_media(response.media, file=download_path)
             await conv.send_message("✅ File berhasil diunduh. Memulai proses penambahan anggota...")
 
             asyncio.create_task(run_pooled_broadcast_task(
                 event, session_names, target_str, delay_minutes, 
-                invite_link, mode='default', excel_file_path=download_path
+                invite_link, mode='default', excel_file_path=download_path, start_message_id=event.message.id
             ))
     except asyncio.TimeoutError:
         await event.reply("⏱️ Waktu tunggu untuk unggah file habis. Proses dibatalkan.")
