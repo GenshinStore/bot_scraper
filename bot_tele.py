@@ -878,7 +878,7 @@ async def accounts_handler(event):
         message += f"{i}. `{session_file.stem}`\n"
     await event.reply(message)
 
-@bot_client.on(events.NewMessage(pattern=r'/scraper (\w+)'))
+@bot_client.on(events.NewMessage(pattern=r'/scraper (\w+)$'))
 async def scraper_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     session_name = event.pattern_match.group(1)
