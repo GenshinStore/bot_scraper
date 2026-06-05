@@ -124,7 +124,7 @@ async def send_group_link(user_client, user_id, user_username, target_entity, cu
     except Exception as e:
         return False, f"Error kirim link: {e}"
 
-async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default'):
+async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default', skip_user_ids=None):
     """Fungsi utama untuk menjalankan proses broadcast/add member."""
     TASK_STATE[session_name] = {
         "running": True,
@@ -132,11 +132,16 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         "stop_requested": False,
     }
 
+    # Inisialisasi set skip jika tidak disediakan
+    if skip_user_ids is None:
+        skip_user_ids = set()
+
     stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
     history_log = []
     start_time = datetime.now()
     status_message = await event.reply(f"Memulai proses broadcast dengan akun `{session_name}`...")
 
+    stop_reason_code = 'error' # Default stop reason
     try:
         await user_client.connect()
         if not await user_client.is_user_authorized():
@@ -258,6 +263,10 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             status_code = ""
             status_detail = ""
 
+            # Lewati user jika sudah diproses oleh akun lain di pool yang sama
+            if uid in skip_user_ids:
+                continue
+
             # Pengecekan utama: Lewati jika user sudah ada di daftar anggota yang diambil sebelumnya.
             if uid in existing_member_ids:
                 stats['already_member'] += 1
@@ -335,11 +344,8 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                                 await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI (FLOOD WAIT)!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
                                 status_detail = "Telegram flood wait limit hit (unknown duration)."
                             
-                            TASK_STATE[session_name]["stop_requested"] = True
-                            last_status_text = f"🛑 {current_user_display}: Gagal (LIMIT FLOOD WAIT)."
-                            stats['failed'] += 1
-                            status_code = "failed"
-                        
+                            stop_reason_code = 'flood_wait'
+                            break # Hentikan loop untuk akun ini, akan dilanjutkan oleh akun lain
                         elif "too many requests" in reason.lower():
                             await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
                             TASK_STATE[session_name]["stop_requested"] = True # Memicu penghentian loop
@@ -405,12 +411,16 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             f"⏱️ **Total Durasi:** {str(datetime.now() - start_time).split('.')[0]}"
         )
         await event.reply(final_summary)
+        stop_reason_code = 'completed' if not TASK_STATE.get(session_name, {}).get("stop_requested") else 'stopped_by_user'
 
     except Exception as e:
         await event.reply(f"❌ Terjadi error saat broadcast dengan `{session_name}`:\n`{e}`")
         traceback.print_exc()
+        stop_reason_code = 'error'
     finally:
         # Simpan dan kirim log riwayat dalam format Excel
+        processed_ids_this_run = {log.get("user_id") for log in history_log}
+
         if history_log:
             os.makedirs("history", exist_ok=True)
             history_file = f"history/broadcast_history_{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -450,6 +460,8 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             del TASK_STATE[session_name]
         if user_client.is_connected():
             await user_client.disconnect()
+        
+        return stop_reason_code, processed_ids_this_run
 
 async def scrape_group_members(user_client, group_entity):
     """Scrape anggota dari satu grup."""
@@ -698,11 +710,11 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Contoh:* `/addgrup akun1 @grupkeren 10`
 *Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC...`
 
-` /addgrupfast <nama_sesi> <target> <jeda_menit> `
+` /addgrupfast <nama_sesi> <target> <jeda_menit> ` (Bisa multi-akun: `akun1,akun2`)
 *Fungsi:* Sama seperti /addgrup, tapi **melewati** anggota dengan akun privat (tidak mengirim link). Berguna untuk menambah anggota secara cepat.
 *Contoh:* `/addgrupfast akun1 @grupkeren 5`
 
-` /addgrupexcel <nama_sesi> <target> <jeda_menit> [link_opsional] `
+` /addgrupexcel <nama_sesi> <target> <jeda_menit> [link_opsional] ` (Bisa multi-akun: `akun1,akun2`)
 *Fungsi:* Menambah anggota dengan mengunggah file Excel manual.
 *Contoh:* `/addgrupexcel akun1 @grupkeren 10`
 
@@ -955,48 +967,84 @@ async def scrapegrup_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_single_group_scraping(event, user_client, session_name, target_str))
 
-async def _parse_add_args(event, command_name):
-    """Helper untuk mem-parsing argumen untuk /addgrup dan /addgrupexcel."""
-    args = event.pattern_match.group(2).split()
-    if not (2 <= len(args) <= 3):
-        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/{command_name} <nama_sesi> <target> <jeda_menit> [link_undangan]`\n\nLihat /help untuk detail.")
-        return None, None, None
+async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None):
+    """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
+    globally_processed_ids = set()
+    is_first_run = True
 
-    try:
-        target_str = args[0]
-        delay_minutes = int(args[1])
-        invite_link = args[2] if len(args) == 3 else None
-        return target_str, delay_minutes, invite_link
-    except ValueError:
-        await event.reply("❌ **Format Salah!**\n`<jeda_menit>` harus berupa angka.")
-        return None, None, None
+    for i, session_name in enumerate(session_names):
+        session_name = session_name.strip() # Hapus spasi
+        if not session_name: continue
 
-@bot_client.on(events.NewMessage(pattern=r'/addgrup (\w+) (.+)'))
+        if TASK_STATE.get(session_name, {}).get("running"):
+            await event.reply(f"⚠️ Melewati akun `{session_name}` karena sedang menjalankan tugas lain.")
+            continue
+
+        if not is_first_run:
+            await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
+        is_first_run = False
+
+        session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
+        if not session_path.exists():
+            await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Melewati...")
+            continue
+
+        user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+        
+        stop_reason, processed_this_run = await run_broadcast(
+            event, user_client, session_name, target_str, delay_minutes, 
+            invite_link, excel_file_path=excel_file_path, mode=mode, 
+            skip_user_ids=globally_processed_ids
+        )
+
+        globally_processed_ids.update(processed_this_run)
+
+        if stop_reason == 'completed':
+            await event.reply(f"🎉 Semua proses selesai dengan sukses menggunakan akun `{session_name}`.")
+            return
+        elif stop_reason == 'stopped_by_user':
+            await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
+            return
+        elif stop_reason == 'flood_wait':
+            if i < len(session_names) - 1:
+                await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
+                continue
+            else:
+                await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan.")
+                return
+        elif stop_reason == 'error':
+            if i < len(session_names) - 1:
+                await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
+                continue
+            else:
+                await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
+                return
+
+@bot_client.on(events.NewMessage(pattern=r'/addgrup (\S+) (.+)'))
 async def addgrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_name = event.pattern_match.group(1)
-    if TASK_STATE.get(session_name, {}).get("running"):
-        await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
+    session_names_str = event.pattern_match.group(1)
+    session_names = [s.strip() for s in session_names_str.split(',')]
+    
+    args = event.pattern_match.group(2).split()
+    if not (2 <= len(args) <= 3):
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrup <sesi> <target> <jeda> [link]`")
+        return
+    
+    target_str, delay_minutes_str, invite_link = args[0], args[1], args[2] if len(args) == 3 else None
+    try:
+        delay_minutes = int(delay_minutes_str)
+    except ValueError:
+        await event.reply("❌ `<jeda_menit>` harus berupa angka.")
         return
 
-    target_str, delay_minutes, invite_link = await _parse_add_args(event, "addgrup")
-    if target_str is None:
-        return
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default'))
 
-    session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
-    if not session_path.exists():
-        await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Gunakan `/login {session_name}` atau periksa daftar dengan `/accounts`.")
-        return
-    user_client = TelegramClient(str(session_path), API_ID, API_HASH)
-    asyncio.create_task(run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link))
-
-@bot_client.on(events.NewMessage(pattern=r'/addgrupfast (\w+) (.+)'))
+@bot_client.on(events.NewMessage(pattern=r'/addgrupfast (\S+) (.+)'))
 async def addgrupfast_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_name = event.pattern_match.group(1)
-    if TASK_STATE.get(session_name, {}).get("running"):
-        await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
-        return
+    session_names_str = event.pattern_match.group(1)
+    session_names = [s.strip() for s in session_names_str.split(',')]
 
     # Parse args, mode ini tidak butuh link undangan
     args = event.pattern_match.group(2).split()
@@ -1011,28 +1059,24 @@ async def addgrupfast_handler(event):
         await event.reply("❌ **Format Salah!**\n`<jeda_menit>` harus berupa angka.")
         return
 
-    session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
-    if not session_path.exists():
-        await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Gunakan `/login {session_name}` atau periksa daftar dengan `/accounts`.")
-        return
-    user_client = TelegramClient(str(session_path), API_ID, API_HASH)
-    asyncio.create_task(run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link=None, mode='fast'))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast'))
 
-@bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (\w+) (.+)'))
+@bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (\S+) (.+)'))
 async def addgrupexcel_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
-    session_name = event.pattern_match.group(1)
-    if TASK_STATE.get(session_name, {}).get("running"):
-        await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
-        return
+    session_names_str = event.pattern_match.group(1)
+    session_names = [s.strip() for s in session_names_str.split(',')]
 
-    target_str, delay_minutes, invite_link = await _parse_add_args(event, "addgrupexcel")
-    if target_str is None:
+    args = event.pattern_match.group(2).split()
+    if not (2 <= len(args) <= 3):
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupexcel <sesi> <target> <jeda> [link]`")
         return
-
-    session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
-    if not session_path.exists():
-        await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Gunakan `/login {session_name}` atau periksa daftar dengan `/accounts`.")
+    
+    target_str, delay_minutes_str, invite_link = args[0], args[1], args[2] if len(args) == 3 else None
+    try:
+        delay_minutes = int(delay_minutes_str)
+    except ValueError:
+        await event.reply("❌ `<jeda_menit>` harus berupa angka.")
         return
 
     try:
@@ -1047,13 +1091,17 @@ async def addgrupexcel_handler(event):
                 return
             
             # Simpan file yang diunggah dengan nama sesi untuk konsistensi
-            download_path = f"manual_upload_{session_name}.xlsx"
+            # Gunakan nama sesi pertama untuk nama file
+            first_session = session_names[0] if session_names else "pool"
+            download_path = f"manual_upload_{first_session}_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx"
             await conv.send_message(f"⏳ Mengunduh file `{file_name or 'file.xlsx'}`...")
             await bot_client.download_media(response.media, file=download_path)
             await conv.send_message("✅ File berhasil diunduh. Memulai proses penambahan anggota...")
 
-            user_client = TelegramClient(str(session_path), API_ID, API_HASH)
-            asyncio.create_task(run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=download_path))
+            asyncio.create_task(run_pooled_broadcast_task(
+                event, session_names, target_str, delay_minutes, 
+                invite_link, mode='default', excel_file_path=download_path
+            ))
     except asyncio.TimeoutError:
         await event.reply("⏱️ Waktu tunggu untuk unggah file habis. Proses dibatalkan.")
     except Exception as e:
