@@ -668,7 +668,7 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Contoh 2:* `/scrapegrup akun1 -100123456789`
 
 ` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] `
-*Fungsi:* Menambah anggota dari file scrape terakhir.
+*Fungsi:* Menambah anggota dari file scrape **terbaru** untuk sesi tersebut (hasil dari /scraper atau /scrapegrup).
 *Contoh:* `/addgrup akun1 @grupkeren 10`
 *Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC...`
 
