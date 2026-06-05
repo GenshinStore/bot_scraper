@@ -187,11 +187,26 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 await event.reply(f"❌ File Excel yang diberikan `{excel_file.name}` tidak ditemukan.")
                 return
         else:
-            # Untuk /addgrup, cari file scrape yang sesuai dengan nama sesi
-            excel_file_path = f"hasil_scraper_{session_name}.xlsx"
-            excel_file = Path(excel_file_path)
-            if not excel_file.exists():
-                await event.reply(f"❌ File scrape untuk sesi `{session_name}` (`{excel_file.name}`) tidak ditemukan. Jalankan `/scraper {session_name}` terlebih dahulu.")
+            # LOGIKA BARU: Untuk /addgrup, cari file scrape TERBARU yang cocok dengan nama sesi.
+            # Ini memungkinkan penggunaan hasil dari /scraper dan /scrapegrup secara mulus.
+            try:
+                search_pattern = f"hasil_scraper_{session_name}*.xlsx"
+                
+                # Dapatkan daftar file beserta waktu modifikasinya
+                files = [(p, p.stat().st_mtime) for p in Path(".").glob(search_pattern)]
+                
+                if not files:
+                    await event.reply(f"❌ Tidak ada file hasil scrape yang ditemukan untuk sesi `{session_name}`. Jalankan `/scraper {session_name}` atau `/scrapegrup {session_name} <target>` terlebih dahulu.")
+                    return
+
+                # Urutkan file berdasarkan waktu modifikasi (terbaru dulu) dan ambil yang paling atas
+                files.sort(key=lambda x: x[1], reverse=True)
+                excel_file = files[0][0]
+                excel_file_path = str(excel_file)
+                
+                await event.reply(f"ℹ️ Menggunakan file scrape terbaru yang ditemukan: `{excel_file.name}`")
+            except Exception as e:
+                await event.reply(f"❌ Terjadi error saat mencari file scrape: {e}")
                 return
 
         # 3. Baca data member dari file Excel
