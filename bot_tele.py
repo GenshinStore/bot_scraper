@@ -510,15 +510,13 @@ async def scrape_group_members(user_client, group_entity):
     members_dict = {}
     try:
         async for user in user_client.iter_participants(group_entity, limit=None):
-            if isinstance(user, User) and not user.bot:
-            # if isinstance(user, User) and not user.bot and user.username:
+            if isinstance(user, User) and not user.bot and user.username:
                 members_dict[user.id] = user
     except Exception:
         # Jika metode standar gagal, coba metode lain (misal: riwayat pesan)
         try:
             async for message in user_client.iter_messages(group_entity, limit=500):
-                # if message.sender and isinstance(message.sender, User) and not message.sender.bot and message.sender.username:
-                if message.sender and isinstance(message.sender, User) and not message.sender.bot:
+                if message.sender and isinstance(message.sender, User) and not message.sender.bot and message.sender.username:
                     if message.sender.id not in members_dict:
                         members_dict[message.sender.id] = message.sender
         except Exception:
