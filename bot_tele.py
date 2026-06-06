@@ -63,16 +63,32 @@ TASK_STATE = {}
 # FUNGSI HELPER & LOGIKA INTI
 # =====================================================
 
-async def add_user_to_group(user_client, target_group, user_id):
+async def add_user_to_group(user_client, target_group, user_id, user_username=None):
     """Menambahkan user langsung ke grup, menangani supergroup dan grup dasar."""
     try:
+        # PERBAIKAN: Resolve entitas user terlebih dahulu.
+        # Ini penting agar client yang sedang berjalan "mengenal" user target,
+        # terutama jika akun yang menambahkan berbeda dengan akun yang melakukan scrape.
+        user_to_add = None
+        try:
+            # Cara tercepat adalah via ID jika sudah ada di cache sesi.
+            user_to_add = await user_client.get_entity(user_id)
+        except (ValueError, TypeError):
+            # Jika gagal, coba cari via username jika tersedia.
+            if user_username and user_username != 'N/A':
+                user_to_add = await user_client.get_entity(user_username)
+        
+        # Jika user masih tidak ditemukan, biarkan request di bawah gagal agar errornya tercatat.
+        if not user_to_add:
+            user_to_add = user_id
+
         # Cek tipe grup untuk menggunakan request yang benar
         if isinstance(target_group, Channel): # Ini adalah Supergroup
-            await user_client(InviteToChannelRequest(channel=target_group, users=[user_id]))
+            await user_client(InviteToChannelRequest(channel=target_group, users=[user_to_add]))
             return True, "Berhasil ditambahkan (Supergroup)"
         elif isinstance(target_group, Chat): # Ini adalah Grup Dasar
             from telethon.tl.functions.messages import AddChatUserRequest
-            await user_client(AddChatUserRequest(chat_id=target_group.id, user_id=user_id, fwd_limit=10))
+            await user_client(AddChatUserRequest(chat_id=target_group.id, user_id=user_to_add, fwd_limit=10))
             return True, "Berhasil ditambahkan (Grup Dasar)"
         else:
             return False, "Tipe grup tidak didukung"
