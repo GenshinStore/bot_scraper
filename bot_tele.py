@@ -182,7 +182,16 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 # Jika bukan integer, anggap sebagai username (cth: @namagrup)
                 target_entity = await user_client.get_entity(target_str)
         except (ValueError, TypeError, Exception) as e:
-            await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Error: {e}")
+            error_text = str(e)
+            if "Cannot find any entity" in error_text:
+                await event.reply(
+                    f"❌ **Gagal Menemukan Grup Target!**\n\n"
+                    f"Akun `{session_name}` tidak dapat menemukan grup `{target_str}`.\n\n"
+                    f"**Penyebab paling umum:** Akun `{session_name}` **belum bergabung** dengan grup target tersebut. Untuk grup privat (dengan ID seperti `-100...`), sebuah akun wajib menjadi anggota untuk dapat berinteraksi dengannya.\n\n"
+                    f"**Solusi:** Pastikan akun `{session_name}` sudah menjadi anggota grup target, lalu coba lagi."
+                )
+            else:
+                await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Error: {e}")
             return
 
         # PENGECEKAN BARU: Jika grupnya privat, link undangan wajib ada.
