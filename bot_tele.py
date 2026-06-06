@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import random
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -419,26 +420,23 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 stop_reason_code = 'daily_limit_reached'
                 break
 
-            # Jeda sebelum memproses user berikutnya
-            # PERUBAHAN: Jeda utama (delay_minutes) kini diterapkan setelah SETIAP user diproses,
-            # bukan hanya setelah aksi yang berhasil.
+            # --- JEDA ANTAR-USER (MODE BATCH) ---
+            # Jeda panjang (delay_minutes) sekarang berfungsi sebagai jeda antar-akun.
+            # Di sini kita gunakan jeda singkat acak untuk membuat aktivitas lebih natural.
             if i < total_users: # Jangan jeda setelah user terakhir.
-                await status_message.edit(summary_text + f"\n\n**Jeda {delay_minutes} menit...**")
-                await asyncio.sleep(delay_minutes * 60)
+                short_delay = random.randint(10, 25) # Jeda acak antara 10 dan 25 detik
+                await asyncio.sleep(short_delay)
 
         # 5. Kirim laporan akhir
-        final_summary = (
-            f"🏁 **Broadcast Selesai!**\n\n"
-            f"**Total User Diproses:** {stats['processed']}\n"
-            f"✅ **Berhasil Ditambahkan:** {stats['added']}\n"
-            f"🔗 **Link Terkirim:** {stats['link_sent']}\n"
-            f"⏩ **Dilewati (Privasi):** {stats['skipped_privacy']}\n"
-            f"👥 **Sudah Jadi Anggota:** {stats['already_member']}\n"
-            f"❌ **Gagal:** {stats['failed']} (termasuk bot & error)\n\n"
-            f"⏱️ **Total Durasi:** {str(datetime.now() - start_time).split('.')[0]}"
-        )
-        await event.reply(final_summary)
-        stop_reason_code = 'completed' if not TASK_STATE.get(session_name, {}).get("stop_requested") else 'stopped_by_user'
+        # Laporan akhir per-sesi tidak lagi dikirim di sini untuk menghindari kebingungan.
+        # Laporan gabungan akan dikirim oleh run_pooled_broadcast_task di akhir.
+        # Tentukan alasan berhenti yang benar untuk dikembalikan ke pool manager.
+        if TASK_STATE.get(session_name, {}).get("stop_requested"):
+            stop_reason_code = 'stopped_by_user'
+        # Jika loop selesai tanpa error, tandai sebagai 'completed'.
+        # 'error' adalah nilai awal, jadi jika tidak berubah, berarti loop selesai.
+        elif stop_reason_code == 'error':
+            stop_reason_code = 'completed'
 
     except Exception as e:
         await event.reply(f"❌ Terjadi error saat broadcast dengan `{session_name}`:\n`{e}`")
@@ -1121,7 +1119,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
                     total_stats[key] += stats_this_run.get(key, 0)
 
             if stop_reason == 'completed':
-                await event.reply(f"🎉 Semua proses selesai dengan sukses menggunakan akun `{session_name}`.")
+                await event.reply(f"🎉 Semua pengguna dalam file telah diproses dengan sukses menggunakan akun `{session_name}`.")
                 # Keluar dari kedua loop untuk membuat laporan akhir
                 break # Keluar dari for loop
             elif stop_reason == 'stopped_by_user':
@@ -1129,7 +1127,9 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
                 return
             elif stop_reason == 'daily_limit_reached':
                 if i < len(session_names) - 1:
-                    await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai. Beralih ke akun berikutnya...")
+                    await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai.")
+                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
+                    await asyncio.sleep(delay_minutes * 60)
                     continue
                 else:
                     # Akun terakhir juga mencapai limit, akhir dari siklus hari ini
@@ -1137,9 +1137,11 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
             elif stop_reason == 'flood_wait' or stop_reason == 'banned':
                 if i < len(session_names) - 1:
                     if stop_reason == 'flood_wait':
-                        await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
+                        await event.reply(f"🔁 Akun `{session_name}` terkena limit.")
                     else: # banned
-                        await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup. Beralih ke akun berikutnya...")
+                        await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup.")
+                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
+                    await asyncio.sleep(delay_minutes * 60)
                     continue
                 else:
                     # Akun terakhir juga terkena limit, akhir dari siklus hari ini
@@ -1147,6 +1149,8 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
             elif stop_reason == 'error':
                 if i < len(session_names) - 1:
                     await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
+                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
+                    await asyncio.sleep(delay_minutes * 60)
                     continue
                 else:
                     await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
