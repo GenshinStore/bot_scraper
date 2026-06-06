@@ -78,21 +78,21 @@ async def add_user_to_group(user_client, target_group, user_id):
             return False, "Tipe grup tidak didukung"
 
     except FloodWaitError as e:
-        return False, f"FLOOD_WAIT:{e.seconds}"
+        return False, f"FLOOD_WAIT:{e.seconds}" # Kode spesifik untuk Flood Wait
     except RPCError as e:
         error_msg = str(e).lower()
         if "user_already_participant" in error_msg:
-            return False, "User sudah menjadi anggota"
-        elif "privacy" in error_msg or "restricted" in error_msg:
-            return False, "Privasi user membatasi penambahan"
+            return False, "ALREADY_MEMBER" # Kode untuk sudah menjadi anggota
+        elif "privacy" in error_msg or "restricted" in error_msg or "mutual contact" in error_msg:
+            return False, "PRIVACY_RESTRICTED" # Kode terpadu untuk semua jenis privasi
         elif "users_too_much" in error_msg: # Error saat akun sudah terlalu banyak mengundang
-            return False, "Akun telah mencapai limit undangan"
+            return False, "INVITE_LIMIT_REACHED" # Kode untuk limit undangan akun
         elif "banned from sending messages" in error_msg:
-            return False, "BANNED_IN_SUPERGROUP"
+            return False, "BANNED_IN_SUPERGROUP" # Kode untuk akun di-ban dari grup
         else:
-            return False, f"Gagal menambahkan: {e}"
+            return False, f"RPC_ERROR:{e}" # Kode untuk error RPC lainnya
     except Exception as e:
-        return False, f"Error: {e}"
+        return False, f"GENERAL_ERROR:{e}" # Kode untuk error umum
 
 async def send_group_link(user_client, user_id, user_username, target_entity, custom_invite_link=None):
     """Mengirim link undangan grup ke user via DM."""
@@ -308,7 +308,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                     status_detail = f"Failed to get user entity: {e}"
 
                 if should_process:
-                    success, reason = await add_user_to_group(user_client, target_entity, uid)
+                    success, reason_code = await add_user_to_group(user_client, target_entity, uid)
 
                     if success:
                         stats['added'] += 1
@@ -317,7 +317,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                         existing_member_ids.add(uid) # Tambahkan ke set agar tidak diproses lagi
                         status_code = "added"
                         status_detail = "Successfully added to group."
-                    elif "privasi" in reason.lower() or "cannot cast" in reason.lower() or "mutual contact" in reason.lower():
+                    elif reason_code == "PRIVACY_RESTRICTED":
                         # Mode 'fast' akan melewati user dengan privasi, mode 'default' akan mencoba kirim link.
                         if mode == 'fast':
                             stats['skipped_privacy'] += 1
@@ -338,7 +338,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                                 last_status_text = f"❌ {current_user_display}: Gagal tambah & gagal kirim link ({link_reason})."
                                 status_code = "failed"
                                 status_detail = f"Failed to add (privacy) and failed to send link: {link_reason}"
-                    elif "sudah menjadi anggota" in reason.lower():
+                    elif reason_code == "ALREADY_MEMBER":
                         stats['already_member'] += 1
                         last_status_text = f"👥 {current_user_display}: Sudah menjadi anggota."
                         existing_member_ids.add(uid) # Pastikan ada di set
@@ -346,9 +346,9 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                         status_detail = "User already in group (API response)."
                     else:
                         # Pengecekan untuk error limit dari Telegram yang harus menghentikan proses
-                        if reason.startswith("FLOOD_WAIT:"):
+                        if reason_code.startswith("FLOOD_WAIT:"):
                             try:
-                                wait_seconds = int(reason.split(":")[1])
+                                wait_seconds = int(reason_code.split(":")[1])
                                 wait_duration_str = str(timedelta(seconds=wait_seconds))
                                 await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI (FLOOD WAIT)!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama **{wait_duration_str}**.")
                                 status_detail = f"Telegram flood wait limit hit ({wait_seconds}s)."
@@ -358,25 +358,25 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                             
                             stop_reason_code = 'flood_wait'
                             break # Hentikan loop untuk akun ini, akan dilanjutkan oleh akun lain
-                        elif reason == "BANNED_IN_SUPERGROUP":
+                        elif reason_code == "BANNED_IN_SUPERGROUP":
                             await event.reply(f"🛑 **AKUN DI-BAN DARI GRUP!**\n\nAkun `{session_name}` sepertinya telah di-ban atau dibatasi untuk menambahkan anggota di grup target. Proses untuk akun ini dihentikan.\n\n**Rekomendasi:** Coba gunakan akun lain atau periksa status akun `{session_name}` secara manual.")
                             stats['failed'] += 1
                             status_detail = "Account is banned from inviting in the target group."
                             stop_reason_code = 'banned'
                             break # Hentikan loop untuk akun ini
-                        elif "too many requests" in reason.lower():
+                        elif reason_code == "INVITE_LIMIT_REACHED" or "too many requests" in reason_code.lower():
                             await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
                             last_status_text = f"🛑 {current_user_display}: Gagal (LIMIT TERCAPAI)."
                             stats['failed'] += 1
                             status_code = "failed"
-                            status_detail = "Telegram rate limit hit."
+                            status_detail = "Account invite limit reached or too many requests."
                             stop_reason_code = 'flood_wait' # Perlakukan sebagai flood wait agar pool beralih akun
                             break # Hentikan loop untuk akun ini
                         else:
                             stats['failed'] += 1
-                            last_status_text = f"❌ {current_user_display}: Gagal ({reason})."
+                            last_status_text = f"❌ {current_user_display}: Gagal ({reason_code})."
                             status_code = "failed"
-                            status_detail = f"Failed to add: {reason}"
+                            status_detail = f"Failed to add: {reason_code}"
 
             # Simpan log riwayat
             history_log.append({
