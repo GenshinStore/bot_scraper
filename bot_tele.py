@@ -793,7 +793,10 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ---
 ` limit=<angka> `
 *Fungsi:* Dapat ditambahkan di akhir perintah `/addgrup`, `/addgrupfast`, dan `/addgrupexcel` untuk membatasi jumlah user yang diproses per akun dalam satu tugas. Sangat berguna untuk "pemanasan" akun baru.
-*Contoh:* `/addgrupfast akun1,akun2 -100123... 10 limit=50`
+*Contoh:* `/addgrupfast akun1,akun2 -100123... 10 limit=50`\n
+` daily `
+*Fungsi:* Jika ditambahkan, tugas akan otomatis berhenti ketika semua akun mencapai limit harian dan akan dilanjutkan kembali keesokan harinya sampai semua daftar pengguna selesai. Harus digunakan bersama dengan `limit`.
+*Contoh:* `/addgrupfast akun1,akun2 -100... 10 limit=20 daily`
 ---
 **UTILITAS**
 ---
@@ -1044,7 +1047,7 @@ async def scrapergrup_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_single_group_scraping(event, user_client, session_name, source_group_str, target_group_str))
 
-async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None):
+async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None, daily=False):
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
     globally_processed_ids = set()
     is_first_run = True
@@ -1081,75 +1084,114 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
             await event.reply("❌ Tidak ada nama sesi yang valid untuk memulai tugas.")
             return
 
+    while True: # Loop utama untuk siklus harian
+        for i, session_name in enumerate(session_names):
+            session_name = session_name.strip() # Hapus spasi
+            if not session_name: continue
 
-    for i, session_name in enumerate(session_names):
-        session_name = session_name.strip() # Hapus spasi
-        if not session_name: continue
-
-        if TASK_STATE.get(session_name, {}).get("running"):
-            await event.reply(f"⚠️ Melewati akun `{session_name}` karena sedang menjalankan tugas lain.")
-            continue
-
-        if not is_first_run:
-            await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
-        is_first_run = False
-        accounts_used.append(session_name)
-
-        session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
-        if not session_path.exists():
-            await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Melewati...")
-            continue
-
-        user_client = TelegramClient(str(session_path), API_ID, API_HASH)
-        
-        stop_reason, processed_this_run, stats_this_run = await run_broadcast(
-            event, user_client, session_name, target_str, delay_minutes, 
-            invite_link, excel_file_path=source_excel_path, mode=mode, 
-            skip_user_ids=globally_processed_ids,
-            max_users_per_session=max_users_per_session
-        )
-
-        if processed_this_run:
-            globally_processed_ids.update(processed_this_run)
-        
-        if stats_this_run:
-            for key in total_stats:
-                total_stats[key] += stats_this_run.get(key, 0)
-
-        if stop_reason == 'completed':
-            await event.reply(f"🎉 Semua proses selesai dengan sukses menggunakan akun `{session_name}`.")
-            return
-        elif stop_reason == 'stopped_by_user':
-            await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
-            return
-        elif stop_reason == 'daily_limit_reached':
-            if i < len(session_names) - 1:
-                await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai. Beralih ke akun berikutnya...")
+            if TASK_STATE.get(session_name, {}).get("running"):
+                await event.reply(f"⚠️ Melewati akun `{session_name}` karena sedang menjalankan tugas lain.")
                 continue
-            else:
-                await event.reply(f"ℹ️ Batas proses untuk akun terakhir (`{session_name}`) tercapai. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
-                break
-        elif stop_reason == 'flood_wait' or stop_reason == 'banned':
-            if i < len(session_names) - 1:
-                if stop_reason == 'flood_wait':
-                    await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
-                else: # banned
-                    await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup. Beralih ke akun berikutnya...")
+
+            if not is_first_run:
+                await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
+            is_first_run = False
+            if session_name not in accounts_used:
+                accounts_used.append(session_name)
+
+            session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
+            if not session_path.exists():
+                await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Melewati...")
                 continue
-            else:
-                if stop_reason == 'flood_wait':
-                    await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
-                else: # banned
-                    await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga di-ban. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
-                break
-        elif stop_reason == 'error':
-            if i < len(session_names) - 1:
-                await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
-                continue
-            else:
-                await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
+
+            user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+            
+            stop_reason, processed_this_run, stats_this_run = await run_broadcast(
+                event, user_client, session_name, target_str, delay_minutes, 
+                invite_link, excel_file_path=source_excel_path, mode=mode, 
+                skip_user_ids=globally_processed_ids,
+                max_users_per_session=max_users_per_session
+            )
+
+            if processed_this_run:
+                globally_processed_ids.update(processed_this_run)
+            
+            if stats_this_run:
+                for key in total_stats:
+                    total_stats[key] += stats_this_run.get(key, 0)
+
+            if stop_reason == 'completed':
+                await event.reply(f"🎉 Semua proses selesai dengan sukses menggunakan akun `{session_name}`.")
+                # Keluar dari kedua loop untuk membuat laporan akhir
+                break # Keluar dari for loop
+            elif stop_reason == 'stopped_by_user':
+                await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
                 return
-    
+            elif stop_reason == 'daily_limit_reached':
+                if i < len(session_names) - 1:
+                    await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai. Beralih ke akun berikutnya...")
+                    continue
+                else:
+                    # Akun terakhir juga mencapai limit, akhir dari siklus hari ini
+                    break # Keluar dari for loop untuk evaluasi harian
+            elif stop_reason == 'flood_wait' or stop_reason == 'banned':
+                if i < len(session_names) - 1:
+                    if stop_reason == 'flood_wait':
+                        await event.reply(f"🔁 Akun `{session_name}` terkena limit. Beralih ke akun berikutnya...")
+                    else: # banned
+                        await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup. Beralih ke akun berikutnya...")
+                    continue
+                else:
+                    # Akun terakhir juga terkena limit, akhir dari siklus hari ini
+                    break # Keluar dari for loop untuk evaluasi harian
+            elif stop_reason == 'error':
+                if i < len(session_names) - 1:
+                    await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
+                    continue
+                else:
+                    await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
+                    return
+        
+        # --- AKHIR DARI SIKLUS (SEMUA AKUN TELAH DIGUNAKAN SEKALI) ---
+
+        # Cek apakah tugas sudah selesai sepenuhnya
+        try:
+            wb = openpyxl.load_workbook(source_excel_path)
+            ws = wb.active
+            total_users_in_file = sum(1 for row in ws.iter_rows(min_row=2) if any(cell.value for cell in row))
+        except Exception as e:
+            await event.reply(f"❌ Gagal membaca ulang file Excel untuk penjadwalan harian. Tugas dihentikan. Error: {e}")
+            break
+
+        if len(globally_processed_ids) >= total_users_in_file:
+            print("[INFO] Tugas selesai, semua pengguna telah diproses.")
+            break # Keluar dari loop `while True` untuk membuat laporan akhir
+
+        # Jika bukan tugas harian, berhenti setelah satu siklus
+        if not daily:
+            print("[INFO] Tugas sekali jalan selesai.")
+            break
+
+        # Jika sampai di sini, artinya ini tugas harian dan belum selesai. Jeda sampai besok.
+        now = datetime.now()
+        resume_time = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        wait_seconds = (resume_time - now).total_seconds()
+        
+        # Format durasi agar lebih mudah dibaca
+        hours, remainder = divmod(int(wait_seconds), 3600)
+        minutes, _ = divmod(remainder, 60)
+        wait_duration_str = f"{hours} jam {minutes} menit"
+
+        await event.reply(
+            f"🏁 **Siklus Harian Selesai** 🏁\n\n"
+            f"Semua akun telah menyelesaikan tugasnya untuk hari ini.\n"
+            f"Pengguna tersisa untuk diproses: **{total_users_in_file - len(globally_processed_ids)}**\n\n"
+            f"Tugas akan dilanjutkan secara otomatis besok pada pukul **{resume_time.strftime('%H:%M')}** (dalam ~{wait_duration_str})."
+        )
+        await asyncio.sleep(wait_seconds)
+        await event.reply("▶️ **Melanjutkan Tugas Harian Terjadwal...**")
+        is_first_run = True # Reset agar pesan "melanjutkan dengan..." tidak muncul di akun pertama
+
     # Kirim laporan akhir gabungan setelah semua proses selesai
     elapsed_time = datetime.now() - start_time
     final_summary_text = (
@@ -1183,6 +1225,10 @@ async def addgrup_handler(event):
         except (ValueError, IndexError):
             await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
             return
+    
+    is_daily_task = 'daily' in [arg.lower() for arg in args]
+    if is_daily_task:
+        args = [arg for arg in args if arg.lower() != 'daily']
 
     if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrup <sesi> <target> <jeda> [link] [limit=<angka>]`")
@@ -1211,7 +1257,7 @@ async def addgrup_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id, max_users_per_session=max_users_per_session))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupfast (.*)'))
 async def addgrupfast_handler(event):
@@ -1228,6 +1274,10 @@ async def addgrupfast_handler(event):
         except (ValueError, IndexError):
             await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
             return
+            
+    is_daily_task = 'daily' in [arg.lower() for arg in args]
+    if is_daily_task:
+        args = [arg for arg in args if arg.lower() != 'daily']
 
     if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupfast <sesi> <target> <jeda> [limit=<angka>]`\n\nLihat /help untuk detail.")
@@ -1247,7 +1297,7 @@ async def addgrupfast_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id, max_users_per_session=max_users_per_session))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (.*)'))
 async def addgrupexcel_handler(event):
@@ -1264,6 +1314,10 @@ async def addgrupexcel_handler(event):
         except (ValueError, IndexError):
             await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
             return
+            
+    is_daily_task = 'daily' in [arg.lower() for arg in args]
+    if is_daily_task:
+        args = [arg for arg in args if arg.lower() != 'daily']
 
     if len(args) < 3:
         await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupexcel <sesi> <target> <jeda> [link] [limit=<angka>]`")
@@ -1314,7 +1368,7 @@ async def addgrupexcel_handler(event):
             asyncio.create_task(run_pooled_broadcast_task(
                 event, session_names, target_str, delay_minutes, 
                 invite_link, mode='default', excel_file_path=download_path, 
-                start_message_id=event.message.id, max_users_per_session=max_users_per_session
+                start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task
             ))
     except asyncio.TimeoutError:
         await event.reply("⏱️ Waktu tunggu untuk unggah file habis. Proses dibatalkan.")
