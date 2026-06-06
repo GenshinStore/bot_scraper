@@ -495,11 +495,13 @@ async def scrape_group_members(user_client, group_entity):
     try:
         async for user in user_client.iter_participants(group_entity, limit=None):
             if isinstance(user, User) and not user.bot:
+            # if isinstance(user, User) and not user.bot and user.username:
                 members_dict[user.id] = user
     except Exception:
         # Jika metode standar gagal, coba metode lain (misal: riwayat pesan)
         try:
             async for message in user_client.iter_messages(group_entity, limit=500):
+                # if message.sender and isinstance(message.sender, User) and not message.sender.bot and message.sender.username:
                 if message.sender and isinstance(message.sender, User) and not message.sender.bot:
                     if message.sender.id not in members_dict:
                         members_dict[message.sender.id] = message.sender
@@ -773,7 +775,7 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Contoh 1 (scrape saja):* `/scrapergrup akun1 @grup_sumber`
 *Contoh 2 (scrape & filter):* `/scrapergrup akun1 @grup_sumber -100123456`
 
-` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] `
+` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] ` (Bisa multi-akun: `akun1,akun2`)
 *Fungsi:* Menambah anggota dari file scrape **terbaru** untuk sesi tersebut (hasil dari /scraper atau /scrapergrup).
 *Contoh:* `/addgrup akun1 @grupkeren 10`
 *Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC... limit=20`
