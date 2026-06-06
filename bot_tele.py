@@ -308,7 +308,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                     status_detail = f"Failed to get user entity: {e}"
 
                 if should_process:
-                    success, reason_code = await add_user_to_group(user_client, target_entity, uid)
+                    success, reason_code = await add_user_to_group(user_client, target_entity, uid, username)
 
                     if success:
                         stats['added'] += 1
