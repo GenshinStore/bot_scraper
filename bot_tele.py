@@ -797,6 +797,9 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ` daily `
 *Fungsi:* Jika ditambahkan, tugas akan otomatis berhenti ketika semua akun mencapai limit harian dan akan dilanjutkan kembali keesokan harinya sampai semua daftar pengguna selesai. Harus digunakan bersama dengan `limit`.
 *Contoh:* `/addgrupfast akun1,akun2 -100... 10 limit=20 daily`
+` file=<nama_file.xlsx> `
+*Fungsi:* Menggunakan file hasil scrape dengan nama spesifik, daripada yang terbaru secara otomatis.
+*Contoh:* `/addgrupfast akun1 -100... 10 file=hasil_scraper_newsb5_CUAN_DARI_RUMAH_by_DRP.xlsx`
 ---
 **UTILITAS**
 ---
@@ -1059,29 +1062,23 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
     # Ini memastikan semua akun dalam pool menggunakan file yang sama.
     source_excel_path = excel_file_path
     if not source_excel_path:
-        # Gunakan nama sesi pertama untuk menemukan file scrape.
-        first_session_name = session_names[0].strip() if session_names else None
-        if first_session_name:
-            try:
-                search_pattern = rf"hasil_scraper_{first_session_name}*.xlsx"
-                files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
-                if not files:
-                    await event.reply(
-                        f"❌ **File Scrape Tidak Ditemukan!**\n\n"
-                        f"Saya tidak dapat menemukan file hasil scrape untuk sesi utama `{first_session_name}`.\n"
-                        f"Pastikan Anda telah menjalankan `/scraper {first_session_name}` atau `/scrapergrup {first_session_name} <target>` terlebih dahulu.\n\n"
-                        f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
-                    )
-                    return
-                files.sort(key=lambda x: x[1], reverse=True)
-                source_excel_path = str(files[0][0])
-                await event.reply(f"ℹ️ Menggunakan file scrape dari sesi utama `{first_session_name}`: `{Path(source_excel_path).name}`")
-            except Exception as e:
-                await event.reply(f"❌ Terjadi error saat mencari file scrape untuk sesi utama `{first_session_name}`: {e}")
+        try:
+            # LOGIKA BARU: Cari file scrape APAPUN yang paling baru, tidak terikat pada sesi tertentu.
+            search_pattern = "hasil_scraper_*.xlsx"
+            files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
+            if not files:
+                await event.reply(
+                    f"❌ **File Scrape Tidak Ditemukan!**\n\n"
+                    f"Saya tidak dapat menemukan file hasil scrape sama sekali di direktori bot.\n"
+                    f"Pastikan Anda telah menjalankan `/scraper` atau `/scrapergrup` terlebih dahulu.\n\n"
+                    f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
+                )
                 return
-        else:
-            # Ini seharusnya tidak terjadi jika validasi di handler bekerja
-            await event.reply("❌ Tidak ada nama sesi yang valid untuk memulai tugas.")
+            files.sort(key=lambda x: x[1], reverse=True)
+            source_excel_path = str(files[0][0])
+            await event.reply(f"ℹ️ Menggunakan file scrape terbaru yang ditemukan: `{Path(source_excel_path).name}`")
+        except Exception as e:
+            await event.reply(f"❌ Terjadi error saat mencari file scrape terbaru: {e}")
             return
 
     while True: # Loop utama untuk siklus harian
@@ -1221,6 +1218,17 @@ async def addgrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
+    # Parsing untuk file spesifik
+    excel_file_path = None
+    file_arg = next((arg for arg in args if arg.lower().startswith('file=')), None)
+    if file_arg:
+        specified_filename = file_arg.split('=', 1)[1]
+        excel_file_path = SCRIPT_DIR / specified_filename
+        if not excel_file_path.exists():
+            await event.reply(f"❌ File yang Anda tentukan `{specified_filename}` tidak ditemukan.")
+            return
+        args.remove(file_arg)
+
     # Parsing baru untuk argumen limit opsional
     max_users_per_session = None
     limit_arg = next((arg for arg in args if arg.lower().startswith('limit=')), None)
@@ -1263,12 +1271,23 @@ async def addgrup_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupfast (.*)'))
 async def addgrupfast_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
+
+    # Parsing untuk file spesifik
+    excel_file_path = None
+    file_arg = next((arg for arg in args if arg.lower().startswith('file=')), None)
+    if file_arg:
+        specified_filename = file_arg.split('=', 1)[1]
+        excel_file_path = SCRIPT_DIR / specified_filename
+        if not excel_file_path.exists():
+            await event.reply(f"❌ File yang Anda tentukan `{specified_filename}` tidak ditemukan.")
+            return
+        args.remove(file_arg)
 
     # Parsing baru untuk argumen limit opsional
     max_users_per_session = None
@@ -1303,7 +1322,7 @@ async def addgrupfast_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (.*)'))
 async def addgrupexcel_handler(event):
