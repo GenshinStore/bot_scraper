@@ -131,7 +131,7 @@ async def send_group_link(user_client, user_id, user_username, target_entity, cu
     except Exception as e:
         return False, f"Error kirim link: {e}"
 
-async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default', skip_user_ids=None):
+async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default', skip_user_ids=None, max_users_per_session=None):
     """Fungsi utama untuk menjalankan proses broadcast/add member."""
     TASK_STATE[session_name] = {
         "running": True,
@@ -223,8 +223,6 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 files.sort(key=lambda x: x[1], reverse=True)
                 excel_file = files[0][0]
                 excel_file_path = str(excel_file)
-                
-                await event.reply(f"ℹ️ Menggunakan file scrape terbaru yang ditemukan: `{excel_file.name}`")
             except Exception as e:
                 await event.reply(f"❌ Terjadi error saat mencari file scrape: {e}")
                 return
@@ -367,11 +365,12 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                             break # Hentikan loop untuk akun ini
                         elif "too many requests" in reason.lower():
                             await event.reply(f"🛑 **LIMIT TELEGRAM TERDETEKSI!**\n\nAkun `{session_name}` telah dibatasi oleh Telegram karena terlalu banyak permintaan. Proses untuk akun ini dihentikan secara otomatis.\n\n**Rekomendasi:** Istirahatkan akun ini setidaknya selama 24 jam.")
-                            TASK_STATE[session_name]["stop_requested"] = True # Memicu penghentian loop
                             last_status_text = f"🛑 {current_user_display}: Gagal (LIMIT TERCAPAI)."
                             stats['failed'] += 1
                             status_code = "failed"
                             status_detail = "Telegram rate limit hit."
+                            stop_reason_code = 'flood_wait' # Perlakukan sebagai flood wait agar pool beralih akun
+                            break # Hentikan loop untuk akun ini
                         else:
                             stats['failed'] += 1
                             last_status_text = f"❌ {current_user_display}: Gagal ({reason})."
@@ -412,6 +411,13 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 await asyncio.sleep(fwe.seconds + 5)
             except RPCError:
                 pass
+
+            # PERUBAHAN BARU: Cek batas proses per sesi
+            if max_users_per_session is not None and stats['processed'] >= max_users_per_session:
+                # Tidak perlu kirim pesan di sini, ditangani oleh pool manager
+                print(f"[INFO] Akun `{session_name}` telah mencapai batas proses ({max_users_per_session} user).")
+                stop_reason_code = 'daily_limit_reached'
+                break
 
             # Jeda sebelum memproses user berikutnya
             # PERUBAHAN: Jeda utama (delay_minutes) kini diterapkan setelah SETIAP user diproses,
@@ -604,7 +610,7 @@ async def run_scraping(event, user_client, session_name):
         if user_client.is_connected():
             await user_client.disconnect()
 
-async def run_single_group_scraping(event, user_client, session_name, target_str):
+async def run_single_group_scraping(event, user_client, session_name, source_group_str, target_group_str=None):
     """Fungsi utama untuk menjalankan proses scraping dari satu grup spesifik."""
     TASK_STATE[session_name] = {
         "running": True,
@@ -624,33 +630,60 @@ async def run_single_group_scraping(event, user_client, session_name, target_str
         # 1. Dapatkan entitas grup target
         try:
             try:
-                target_id = int(target_str)
-                target_entity = await user_client.get_entity(target_id)
+                source_id = int(source_group_str)
+                source_entity = await user_client.get_entity(source_id)
             except ValueError:
-                target_entity = await user_client.get_entity(target_str)
+                source_entity = await user_client.get_entity(source_group_str)
         except (ValueError, TypeError, Exception) as e:
-            await event.reply(f"❌ Gagal menemukan grup target `{target_str}`. Pastikan akun `{session_name}` adalah anggota grup tersebut. Error: {e}")
+            await event.reply(f"❌ Gagal menemukan grup sumber `{source_group_str}`. Pastikan akun `{session_name}` adalah anggota grup tersebut. Error: {e}")
             return
+
+        # FITUR BARU: Proses grup target untuk filtering
+        target_group_members = set()
+        skipped_due_to_target = 0
+        target_entity = None
+        if target_group_str:
+            await status_message.edit(f"⏳ Mencari grup target filter `{target_group_str}`...")
+            try:
+                try:
+                    target_id = int(target_group_str)
+                    target_entity = await user_client.get_entity(target_id)
+                except ValueError:
+                    target_entity = await user_client.get_entity(target_group_str)
+                
+                await status_message.edit(f"⏳ Mengambil daftar anggota dari grup target **{target_entity.title}** untuk perbandingan...")
+                async for member in user_client.iter_participants(target_entity):
+                    target_group_members.add(member.id)
+                
+                if target_group_members:
+                    await event.reply(f"✅ Ditemukan **{len(target_group_members)}** anggota di grup target. Anggota yang sama akan dilewati dari hasil scrape.")
+                else:
+                    await event.reply(f"ℹ️ Tidak ada anggota yang ditemukan di grup target **{target_entity.title}** atau akses terbatas. Scraping akan berjalan normal.")
+
+            except Exception as e:
+                await event.reply(f"⚠️ Gagal memproses grup target `{target_group_str}`. Scraping akan dilanjutkan tanpa memfilter anggota. Error: {e}")
+                target_group_members = set() # Reset jika gagal
+
 
         # Fitur Baru: Coba bergabung ke grup/channel secara otomatis.
         # Ini akan gagal jika grup privat atau chat biasa, dan itu tidak masalah.
         # Jika sudah menjadi anggota, tidak akan terjadi apa-apa.
         try:
             from telethon.tl.functions.channels import JoinChannelRequest
-            await user_client(JoinChannelRequest(target_entity))
-            await status_message.edit(f"✅ Akun `{session_name}` mencoba bergabung/memastikan keanggotaan di **{target_entity.title}**...")
+            await user_client(JoinChannelRequest(source_entity))
+            await status_message.edit(f"✅ Akun `{session_name}` mencoba bergabung/memastikan keanggotaan di **{source_entity.title}**...")
             await asyncio.sleep(2) # Jeda singkat agar status terbaca
         except Exception:
             # Abaikan error di sini (misal: jika ini grup dasar/chat privat), proses scraping akan tetap dicoba.
             pass
 
         # 2. Lakukan scraping
-        await status_message.edit(f"🔄 Scraping... Sedang memproses: **{target_entity.title}**")
+        await status_message.edit(f"🔄 Scraping... Sedang memproses: **{source_entity.title}**")
         
-        success, members_dict = await scrape_group_members(user_client, target_entity)
+        success, members_dict = await scrape_group_members(user_client, source_entity)
 
         if not success or not members_dict:
-            await event.reply(f"❌ Gagal melakukan scrape anggota dari grup **{target_entity.title}**. Kemungkinan anggota grup tersembunyi atau tidak ada akses.")
+            await event.reply(f"❌ Gagal melakukan scrape anggota dari grup **{source_entity.title}**. Kemungkinan anggota grup tersembunyi atau tidak ada akses.")
             return
 
         # 3. Simpan hasil ke file Excel
@@ -658,24 +691,40 @@ async def run_single_group_scraping(event, user_client, session_name, target_str
         ws = wb.active
         ws.title = "Scraped Members"
         ws.append(['group_id', 'group_title', 'uid', 'username', 'name'])
-
+        
+        final_members_to_add = {}
         for uid, user in members_dict.items():
-            ws.append([target_entity.id, target_entity.title, uid, user.username or 'N/A', user.first_name or '(No Name)'])
+            if uid in target_group_members:
+                skipped_due_to_target += 1
+                continue # Lewati jika anggota sudah ada di grup target
+            final_members_to_add[uid] = user
 
-        safe_group_title = "".join(c for c in target_entity.title if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
+        for uid, user in final_members_to_add.items():
+            ws.append([source_entity.id, source_entity.title, uid, user.username or 'N/A', user.first_name or '(No Name)'])
+
+        safe_group_title = "".join(c for c in source_entity.title if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
         output_file = SCRIPT_DIR / f"hasil_scraper_{session_name}_{safe_group_title}.xlsx"
         wb.save(output_file)
 
         # 4. Kirim ringkasan dan file ke user
-        total_members = len(members_dict)
+        total_found = len(members_dict)
+        total_added_to_file = len(final_members_to_add)
         elapsed_time = datetime.now() - start_time
+        
         summary_text = (
             f"🏁 **Scraping Grup Selesai!**\n\n"
-            f"**Grup Target:** {target_entity.title}\n"
-            f"👥 **Total Anggota Unik Ditemukan:** {total_members}\n\n"
-            f"⏱️ **Durasi:** {str(elapsed_time).split('.')[0]}\n\n"
-            f"Laporan lengkap disimpan dalam file Excel `{output_file}`."
+            f"**Grup Sumber:** {source_entity.title}\n"
+            f"👥 **Total Anggota Ditemukan:** {total_found}\n"
         )
+        if target_group_str and target_entity:
+            summary_text += (
+                f"**Grup Target (Filter):** {target_entity.title}\n"
+                f"⏭️ **Dilewati (Sudah Join):** {skipped_due_to_target}\n"
+                f"✅ **Anggota Unik Ditambahkan ke File:** {total_added_to_file}\n\n"
+            )
+        
+        summary_text += f"⏱️ **Durasi:** {str(elapsed_time).split('.')[0]}\n\nLaporan lengkap disimpan dalam file Excel `{output_file}`."
+
         await event.client.send_file(
             event.chat_id,
             output_file,
@@ -720,16 +769,16 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ---
 ` /scraper <nama_sesi> `
 *Fungsi:* Scrape anggota dari semua grup di akun target.
-*Contoh:* `/scraper akun1`
-` /scrapergrup <nama_sesi> <target_grup> `
-*Fungsi:* Scrape anggota dari satu grup spesifik.
-*Contoh 1:* `/scrapergrup akun1 @grupkeren`
-*Contoh 2:* `/scrapergrup akun1 -100123456789`
+*Contoh:* `/scraper akun1`\n
+` /scrapergrup <nama_sesi> <grup_sumber> [grup_target_filter] `
+*Fungsi:* Scrape anggota dari satu grup sumber. Jika `grup_target_filter` diberikan, anggota yang sudah ada di grup target akan dikecualikan dari hasil.
+*Contoh 1 (scrape saja):* `/scrapergrup akun1 @grup_sumber`
+*Contoh 2 (scrape & filter):* `/scrapergrup akun1 @grup_sumber -100123456`
 
 ` /addgrup <nama_sesi> <target> <jeda_menit> [link_opsional] `
 *Fungsi:* Menambah anggota dari file scrape **terbaru** untuk sesi tersebut (hasil dari /scraper atau /scrapergrup).
 *Contoh:* `/addgrup akun1 @grupkeren 10`
-*Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC...`
+*Contoh 2:* `/addgrup akun2 -100123456 5 https://t.me/joinchat/ABC... limit=20`
 
 ` /addgrupfast <nama_sesi> <target> <jeda_menit> ` (Bisa multi-akun: `akun1,akun2`)
 *Fungsi:* Sama seperti /addgrup, tapi **melewati** anggota dengan akun privat (tidak mengirim link). Berguna untuk menambah anggota secara cepat.
@@ -739,6 +788,12 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Fungsi:* Menambah anggota dengan mengunggah file Excel manual.
 *Contoh:* `/addgrupexcel akun1 @grupkeren 10`
 
+---
+**OPSI TAMBAHAN**
+---
+` limit=<angka> `
+*Fungsi:* Dapat ditambahkan di akhir perintah `/addgrup`, `/addgrupfast`, dan `/addgrupexcel` untuk membatasi jumlah user yang diproses per akun dalam satu tugas. Sangat berguna untuk "pemanasan" akun baru.
+*Contoh:* `/addgrupfast akun1,akun2 -100123... 10 limit=50`
 ---
 **UTILITAS**
 ---
@@ -970,11 +1025,12 @@ async def scraper_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_scraping(event, user_client, session_name))
 
-@bot_client.on(events.NewMessage(pattern=r'/scrapergrup (\w+) (.+)'))
+@bot_client.on(events.NewMessage(pattern=r'/scrapergrup (\w+) ([^ ]+)(?:\s+(.+))?'))
 async def scrapergrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     session_name = event.pattern_match.group(1)
-    target_str = event.pattern_match.group(2)
+    source_group_str = event.pattern_match.group(2)
+    target_group_str = event.pattern_match.group(3) # Bisa None jika tidak ada
 
     if TASK_STATE.get(session_name, {}).get("running"):
         await event.reply(f"⚠️ Akun `{session_name}` sedang menjalankan tugas `{TASK_STATE[session_name]['task_name']}`. Harap tunggu.")
@@ -986,15 +1042,44 @@ async def scrapergrup_handler(event):
         return
         
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
-    asyncio.create_task(run_single_group_scraping(event, user_client, session_name, target_str))
+    asyncio.create_task(run_single_group_scraping(event, user_client, session_name, source_group_str, target_group_str))
 
-async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None):
+async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None):
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
     globally_processed_ids = set()
     is_first_run = True
     total_stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
     accounts_used = []
     start_time = datetime.now()
+
+    # LOGIKA BARU: Tentukan file Excel sumber SEKALI di awal, jika tidak disediakan.
+    # Ini memastikan semua akun dalam pool menggunakan file yang sama.
+    source_excel_path = excel_file_path
+    if not source_excel_path:
+        # Gunakan nama sesi pertama untuk menemukan file scrape.
+        first_session_name = session_names[0].strip() if session_names else None
+        if first_session_name:
+            try:
+                search_pattern = rf"hasil_scraper_{first_session_name}*.xlsx"
+                files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
+                if not files:
+                    await event.reply(
+                        f"❌ **File Scrape Tidak Ditemukan!**\n\n"
+                        f"Saya tidak dapat menemukan file hasil scrape untuk sesi utama `{first_session_name}`.\n"
+                        f"Pastikan Anda telah menjalankan `/scraper {first_session_name}` atau `/scrapergrup {first_session_name} <target>` terlebih dahulu.\n\n"
+                        f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
+                    )
+                    return
+                files.sort(key=lambda x: x[1], reverse=True)
+                source_excel_path = str(files[0][0])
+                await event.reply(f"ℹ️ Menggunakan file scrape dari sesi utama `{first_session_name}`: `{Path(source_excel_path).name}`")
+            except Exception as e:
+                await event.reply(f"❌ Terjadi error saat mencari file scrape untuk sesi utama `{first_session_name}`: {e}")
+                return
+        else:
+            # Ini seharusnya tidak terjadi jika validasi di handler bekerja
+            await event.reply("❌ Tidak ada nama sesi yang valid untuk memulai tugas.")
+            return
 
 
     for i, session_name in enumerate(session_names):
@@ -1019,8 +1104,9 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         
         stop_reason, processed_this_run, stats_this_run = await run_broadcast(
             event, user_client, session_name, target_str, delay_minutes, 
-            invite_link, excel_file_path=excel_file_path, mode=mode, 
-            skip_user_ids=globally_processed_ids
+            invite_link, excel_file_path=source_excel_path, mode=mode, 
+            skip_user_ids=globally_processed_ids,
+            max_users_per_session=max_users_per_session
         )
 
         if processed_this_run:
@@ -1036,6 +1122,13 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         elif stop_reason == 'stopped_by_user':
             await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
             return
+        elif stop_reason == 'daily_limit_reached':
+            if i < len(session_names) - 1:
+                await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai. Beralih ke akun berikutnya...")
+                continue
+            else:
+                await event.reply(f"ℹ️ Batas proses untuk akun terakhir (`{session_name}`) tercapai. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
+                break
         elif stop_reason == 'flood_wait' or stop_reason == 'banned':
             if i < len(session_names) - 1:
                 if stop_reason == 'flood_wait':
@@ -1048,7 +1141,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
                     await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga terkena limit. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
                 else: # banned
                     await event.reply(f"🛑 Akun terakhir (`{session_name}`) juga di-ban. Semua akun dalam pool telah digunakan. Menyiapkan laporan akhir...")
-                return
+                break
         elif stop_reason == 'error':
             if i < len(session_names) - 1:
                 await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
@@ -1080,8 +1173,19 @@ async def addgrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
+    # Parsing baru untuk argumen limit opsional
+    max_users_per_session = None
+    limit_arg = next((arg for arg in args if arg.lower().startswith('limit=')), None)
+    if limit_arg:
+        try:
+            max_users_per_session = int(limit_arg.split('=')[1])
+            args.remove(limit_arg) # Hapus dari daftar argumen agar tidak mengganggu parsing lama
+        except (ValueError, IndexError):
+            await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
+            return
+
     if len(args) < 3:
-        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrup <sesi> <target> <jeda> [link]`")
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrup <sesi> <target> <jeda> [link] [limit=<angka>]`")
         return
     
     # Cek apakah argumen terakhir adalah link
@@ -1107,15 +1211,26 @@ async def addgrup_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', start_message_id=event.message.id, max_users_per_session=max_users_per_session))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupfast (.*)'))
 async def addgrupfast_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
+    # Parsing baru untuk argumen limit opsional
+    max_users_per_session = None
+    limit_arg = next((arg for arg in args if arg.lower().startswith('limit=')), None)
+    if limit_arg:
+        try:
+            max_users_per_session = int(limit_arg.split('=')[1])
+            args.remove(limit_arg) # Hapus dari daftar argumen
+        except (ValueError, IndexError):
+            await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
+            return
+
     if len(args) < 3:
-        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupfast <nama_sesi> <target> <jeda_menit>`\n\nLihat /help untuk detail.")
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupfast <sesi> <target> <jeda> [limit=<angka>]`\n\nLihat /help untuk detail.")
         return
 
     try:
@@ -1132,15 +1247,26 @@ async def addgrupfast_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', start_message_id=event.message.id, max_users_per_session=max_users_per_session))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (.*)'))
 async def addgrupexcel_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
 
+    # Parsing baru untuk argumen limit opsional
+    max_users_per_session = None
+    limit_arg = next((arg for arg in args if arg.lower().startswith('limit=')), None)
+    if limit_arg:
+        try:
+            max_users_per_session = int(limit_arg.split('=')[1])
+            args.remove(limit_arg) # Hapus dari daftar argumen
+        except (ValueError, IndexError):
+            await event.reply("❌ Format limit salah. Gunakan `limit=<angka>`, contoh: `limit=10`.")
+            return
+
     if len(args) < 3:
-        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupexcel <sesi> <target> <jeda> [link]`")
+        await event.reply(f"❌ **Format Salah!**\n\nGunakan: `/addgrupexcel <sesi> <target> <jeda> [link] [limit=<angka>]`")
         return
     
     # Cek apakah argumen terakhir adalah link
@@ -1187,7 +1313,8 @@ async def addgrupexcel_handler(event):
 
             asyncio.create_task(run_pooled_broadcast_task(
                 event, session_names, target_str, delay_minutes, 
-                invite_link, mode='default', excel_file_path=download_path, start_message_id=event.message.id
+                invite_link, mode='default', excel_file_path=download_path, 
+                start_message_id=event.message.id, max_users_per_session=max_users_per_session
             ))
     except asyncio.TimeoutError:
         await event.reply("⏱️ Waktu tunggu untuk unggah file habis. Proses dibatalkan.")
