@@ -316,7 +316,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                         existing_member_ids.add(uid) # Tambahkan ke set agar tidak diproses lagi
                         status_code = "added"
                         status_detail = "Successfully added to group."
-                    elif "privasi" in reason.lower() or "cannot cast" in reason.lower():
+                    elif "privasi" in reason.lower() or "cannot cast" in reason.lower() or "mutual contact" in reason.lower():
                         # Mode 'fast' akan melewati user dengan privasi, mode 'default' akan mencoba kirim link.
                         if mode == 'fast':
                             stats['skipped_privacy'] += 1
