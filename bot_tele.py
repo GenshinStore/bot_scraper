@@ -36,6 +36,10 @@ ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR and ADMIN_ID_STR.isdigit() else 0
 SESSIONS_DIR = SCRIPT_DIR / "sessions"
 BOT_SESSION_NAME = "bot_session" # Hanya nama, bukan path
 BOT_SESSION_PATH = str(SESSIONS_DIR / BOT_SESSION_NAME)
+HISTORY_DIR = SCRIPT_DIR / "history"
+DEFAULT_HISTORY_FILE = HISTORY_DIR / "global_broadcast_history.xlsx"
+
+os.makedirs(HISTORY_DIR, exist_ok=True)
 
 # Pastikan direktori sesi ada
 os.makedirs(SESSIONS_DIR, exist_ok=True)
@@ -58,6 +62,66 @@ bot_client = TelegramClient(BOT_SESSION_PATH, API_ID, API_HASH)
 # Dictionary untuk mengelola tugas yang berjalan per sesi
 # Key: session_name, Value: { "running": bool, "task_name": str, "stop_requested": bool }
 TASK_STATE = {}
+
+# =====================================================
+# FUNGSI HELPER RIWAYAT (HISTORY)
+# =====================================================
+def load_history_data(history_path: Path):
+    """
+    Memuat file riwayat dan mengembalikan peta status dan satu set semua ID yang diproses.
+    Returns:
+        tuple: (status_map, processed_ids)
+        status_map (dict): {user_id: status}
+        processed_ids (set): {user_id1, user_id2, ...}
+    """
+    if not history_path.exists():
+        return {}, set()
+
+    processed_ids = set()
+    status_map = {}
+    try:
+        wb = openpyxl.load_workbook(history_path)
+        ws = wb.active
+        headers = [cell.value for cell in ws[1]]
+        try:
+            uid_col_idx = headers.index("User ID")
+            status_col_idx = headers.index("Status")
+        except ValueError:
+            print(f"[WARNING] File riwayat '{history_path.name}' memiliki header tidak valid. Melewatkan.")
+            return {}, set()
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row or not row[uid_col_idx]: continue
+            try:
+                uid = int(row[uid_col_idx])
+                status = row[status_col_idx]
+                processed_ids.add(uid)
+                status_map[uid] = status
+            except (ValueError, TypeError, IndexError):
+                continue
+        return status_map, processed_ids
+    except Exception as e:
+        print(f"[ERROR] Gagal membaca file riwayat {history_path}: {e}")
+        return {}, set()
+
+def append_logs_to_history(history_path: Path, history_logs: list):
+    """Menambahkan daftar entri log ke file riwayat Excel yang ditentukan."""
+    if not history_logs: return
+
+    headers = ["Timestamp", "User ID", "User Name", "Username", "Target Group ID", "Target Group Title", "Status", "Details"]
+    
+    try:
+        wb = openpyxl.load_workbook(history_path) if history_path.exists() else Workbook()
+        ws = wb.active
+        if not history_path.exists() or ws.max_row == 0:
+            ws.title = "Global Broadcast History"
+            ws.append(headers)
+        for log_entry in history_logs:
+            ws.append([log_entry.get(h.lower().replace(" ", "_")) for h in headers])
+        wb.save(history_path)
+        print(f"[INFO] Menambahkan {len(history_logs)} catatan ke file riwayat: {history_path.name}")
+    except Exception as e:
+        print(f"[ERROR] Gagal menulis ke file riwayat {history_path}: {e}")
 
 # =====================================================
 # FUNGSI HELPER & LOGIKA INTI
@@ -148,7 +212,7 @@ async def send_group_link(user_client, user_id, user_username, target_entity, cu
     except Exception as e:
         return False, f"Error kirim link: {e}"
 
-async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, excel_file_path=None, mode='default', skip_user_ids=None, max_users_per_session=None):
+async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, member_list, source_filename, mode='default', skip_user_ids=None, max_users_per_session=None):
     """Fungsi utama untuk menjalankan proses broadcast/add member."""
     TASK_STATE[session_name] = {
         "running": True,
@@ -220,67 +284,18 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
             await event.reply(f"⚠️ Gagal mengambil daftar anggota grup target. Pengecekan duplikat mungkin tidak akurat. Error: {e}")
             # Tetap lanjutkan, bot akan mengandalkan error 'user_already_participant'
 
-        # 2. Tentukan file Excel yang akan digunakan
-        if excel_file_path:
-            excel_file = Path(excel_file_path)
-            if not excel_file.exists():
-                await event.reply(f"❌ File Excel yang diberikan `{excel_file.name}` tidak ditemukan.")
-                return
-        else:
-            # LOGIKA BARU: Untuk /addgrup, cari file scrape TERBARU yang cocok dengan nama sesi.
-            # Ini memungkinkan penggunaan hasil dari /scraper dan /scrapegrup secara mulus.
-            try:
-                # Menggunakan r'' untuk raw string, sesuai permintaan, dan mencari di direktori skrip.
-                search_pattern = rf"hasil_scraper_{session_name}*.xlsx"
-                
-                # Dapatkan daftar file beserta waktu modifikasinya dari direktori skrip
-                files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
-                
-                if not files:
-                    await event.reply(
-                        f"❌ **File Scrape Tidak Ditemukan!**\n\n"
-                        f"Saya tidak dapat menemukan file hasil scrape untuk sesi `{session_name}`.\n"
-                        f"Pastikan Anda telah menjalankan `/scraper {session_name}` atau `/scrapergrup {session_name} <target>` terlebih dahulu.\n\n"
-                        f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
-                    )
-                    return
-
-                # Urutkan file berdasarkan waktu modifikasi (terbaru dulu) dan ambil yang paling atas
-                files.sort(key=lambda x: x[1], reverse=True)
-                excel_file = files[0][0]
-                excel_file_path = str(excel_file)
-            except Exception as e:
-                await event.reply(f"❌ Terjadi error saat mencari file scrape: {e}")
-                return
-
-        # 3. Baca data member dari file Excel
-        all_members = []
-        try:
-            wb = openpyxl.load_workbook(excel_file)
-            ws = wb.active
-            # Ulangi setiap baris, lewati header
-            for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
-                if not any(row): continue # Lewati baris kosong
-
-                # Format: group_id, group_title, uid, username, name
-                if len(row) >= 3 and row[2]:
-                    try:
-                        uid = int(row[2])
-                        username = row[3] if len(row) > 3 else 'N/A'
-                        name = row[4] if len(row) > 4 else '(No Name)'
-                        all_members.append((uid, username, name))
-                    except (ValueError, TypeError):
-                        print(f"[WARNING] Melewati baris {i} di {excel_file.name}: UID '{row[2]}' bukan angka yang valid.")
-                        continue
-        except Exception as e:
-            await event.reply(f"❌ Gagal membaca file Excel `{excel_file.name}`. Error: {e}")
-            traceback.print_exc()
+        # 2. Gunakan daftar anggota yang sudah difilter dari pool manager
+        all_members = member_list
+        if not all_members:
+            await event.reply(f"ℹ️ Akun `{session_name}` tidak menerima daftar anggota untuk diproses. Mungkin semua sudah diproses atau terfilter.")
+            # Ini bukan error, jadi kita kembalikan 'completed'
+            stop_reason_code = 'completed'
             return
-
+        
         total_users = len(all_members)
         await status_message.edit(
             f"🎯 Grup Target: **{target_entity.title}**\n"
-            f"📂 File Scrape: `{excel_file.name}`\n"
+            f"📂 File Scrape: `{source_filename}`\n"
             f"👥 Total User: **{total_users}**\n"
             f"⏳ Jeda: **{delay_minutes} menit**\n\n"
             "Memulai proses..."
@@ -468,64 +483,29 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         traceback.print_exc()
         stop_reason_code = 'error'
     finally:
-        # Simpan dan kirim log riwayat dalam format Excel
+        # Jangan simpan file di sini. Kembalikan log ke pool manager.
         processed_ids_this_run = {log.get("user_id") for log in history_log}
-
-        if history_log:
-            history_dir = SCRIPT_DIR / "history"
-            os.makedirs(history_dir, exist_ok=True)
-            history_file = history_dir / f"broadcast_history_{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            
-            # Buat file Excel
-            wb_history = Workbook()
-            ws_history = wb_history.active
-            ws_history.title = "Broadcast History"
-            
-            # Tulis header
-            headers = ["Timestamp", "User ID", "User Name", "Username", "Target Group ID", "Target Group Title", "Status", "Details"]
-            ws_history.append(headers)
-            
-            # Tulis data dari log
-            for log_entry in history_log:
-                ws_history.append([
-                    log_entry.get("timestamp"), log_entry.get("user_id"),
-                    log_entry.get("user_name"), log_entry.get("user_username"),
-                    log_entry.get("target_group_id"), log_entry.get("target_group_title"),
-                    log_entry.get("status"), log_entry.get("details")
-                ])
-            
-            wb_history.save(history_file)
-            print(f"[INFO] Log riwayat broadcast disimpan ke {history_file}")
-            try:
-                await event.client.send_file(
-                    event.chat_id,
-                    history_file,
-                    caption=f"📝 Log riwayat untuk proses broadcast `{session_name}`.",
-                    reply_to=event.message.id,
-                    attributes=[DocumentAttributeFilename(file_name=Path(history_file).name)]
-                )
-            except Exception as e:
-                print(f"[WARNING] Gagal mengirim file riwayat ke user: {e}")
 
         if session_name in TASK_STATE:
             del TASK_STATE[session_name]
         if user_client.is_connected():
             await user_client.disconnect()
         
-        return stop_reason_code, processed_ids_this_run, stats
+        # Kembalikan log agar bisa digabungkan oleh pool manager
+        return stop_reason_code, processed_ids_this_run, stats, history_log
 
 async def scrape_group_members(user_client, group_entity):
     """Scrape anggota dari satu grup."""
     members_dict = {}
     try:
         async for user in user_client.iter_participants(group_entity, limit=None):
-            if isinstance(user, User) and not user.bot and user.username:
+            if isinstance(user, User) and not user.bot:
                 members_dict[user.id] = user
     except Exception:
         # Jika metode standar gagal, coba metode lain (misal: riwayat pesan)
         try:
             async for message in user_client.iter_messages(group_entity, limit=500):
-                if message.sender and isinstance(message.sender, User) and not message.sender.bot and message.sender.username:
+                if message.sender and isinstance(message.sender, User) and not message.sender.bot:
                     if message.sender.id not in members_dict:
                         members_dict[message.sender.id] = message.sender
         except Exception:
@@ -824,6 +804,16 @@ Berikut adalah format dan contoh perintah yang tersedia.
 *Fungsi:* Menggunakan file hasil scrape dengan nama spesifik, daripada yang terbaru secara otomatis.
 *Contoh:* `/addgrupfast akun1 -100... 10 file=hasil_scraper_newsb5_CUAN_DARI_RUMAH_by_DRP.xlsx`
 ---
+**MANAJEMEN RIWAYAT (HISTORY)**
+---
+` history=<nama_file.xlsx> `
+*Fungsi:* Menggunakan atau membuat file riwayat dengan nama spesifik. Jika tidak diberikan, `global_broadcast_history.xlsx` akan digunakan.
+*Contoh:* `/addgrup akun1 -100... 10 history=proyek_A.xlsx`
+
+` retry=failed `
+*Fungsi:* Menjalankan ulang proses **hanya** untuk anggota yang tercatat 'gagal' di file riwayat. Berguna untuk mencoba kembali setelah memperbaiki masalah.
+*Contoh:* `/addgrup akun1 -100... 10 retry=failed`
+---
 **UTILITAS**
 ---
 ` /idgrup `
@@ -1031,14 +1021,37 @@ async def accounts_handler(event):
     if event.sender_id != ADMIN_ID:
         await event.reply("❌ Anda tidak memiliki izin untuk menggunakan perintah ini.")
         return
+
     session_files = list(Path(SESSIONS_DIR).glob('*.session'))
     if not session_files:
         await event.reply("Tidak ada akun user yang tersimpan. Gunakan `/login <nama_sesi>` untuk menambahkan.")
         return
-    message = "👤 **Daftar Akun User Tersimpan:**\n\n"
+
+    status_message = await event.reply("⏳ Mengambil informasi akun, harap tunggu...")
+    
+    message_lines = ["👤 **Daftar Akun User Tersimpan:**"]
+    
     for i, session_file in enumerate(session_files, 1):
-        message += f"{i}. `{session_file.stem}`\n"
-    await event.reply(message)
+        session_name = session_file.stem
+        temp_client = TelegramClient(str(session_file.resolve()), API_ID, API_HASH)
+        
+        try:
+            await asyncio.wait_for(temp_client.connect(), timeout=15)
+            if await temp_client.is_user_authorized():
+                me = await temp_client.get_me()
+                phone = f"+{me.phone}" if me.phone else "N/A"
+                username = f"@{me.username}" if me.username else "N/A"
+                message_lines.append(f"{i}. **{session_name}**\n   - Nama: `{me.first_name}`\n   - Username: `{username}`\n   - No. HP: `{phone}`")
+            else:
+                message_lines.append(f"{i}. **{session_name}**\n   - Status: `Sesi tidak valid/perlu login ulang`")
+        except Exception as e:
+            print(f"[ERROR] Gagal memeriksa akun {session_name}: {e}")
+            message_lines.append(f"{i}. **{session_name}**\n   - Status: `Gagal terhubung atau sesi korup`")
+        finally:
+            if temp_client.is_connected():
+                await temp_client.disconnect()
+
+    await status_message.edit("\n\n".join(message_lines), parse_mode='md')
 
 @bot_client.on(events.NewMessage(pattern=r'/scraper (\w+)$'))
 async def scraper_handler(event):
@@ -1073,12 +1086,13 @@ async def scrapergrup_handler(event):
     user_client = TelegramClient(str(session_path), API_ID, API_HASH)
     asyncio.create_task(run_single_group_scraping(event, user_client, session_name, source_group_str, target_group_str))
 
-async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None, daily=False):
+async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None, daily=False, history_filename=None, retry_failed_only=False):
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
     globally_processed_ids = set()
     is_first_run = True
     total_stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
     accounts_used = []
+    all_history_logs = [] # Kumpulkan semua log di sini
     start_time = datetime.now()
 
     # LOGIKA BARU: Tentukan file Excel sumber SEKALI di awal, jika tidak disediakan.
@@ -1104,6 +1118,57 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
             await event.reply(f"❌ Terjadi error saat mencari file scrape terbaru: {e}")
             return
 
+    # Baca file sumber ke dalam memori
+    all_members = []
+    try:
+        wb = openpyxl.load_workbook(source_excel_path)
+        ws = wb.active
+        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+            if not any(row): continue
+            if len(row) >= 3 and row[2]:
+                try:
+                    uid = int(row[2])
+                    username = row[3] if len(row) > 3 else 'N/A'
+                    name = row[4] if len(row) > 4 else '(No Name)'
+                    all_members.append((uid, username, name))
+                except (ValueError, TypeError):
+                    print(f"[WARNING] Melewati baris {i} di {Path(source_excel_path).name}: UID '{row[2]}' bukan angka yang valid.")
+                    continue
+    except Exception as e:
+        await event.reply(f"❌ Gagal membaca file Excel sumber `{Path(source_excel_path).name}`. Error: {e}")
+        return
+
+    # Tentukan path riwayat dan filter anggota berdasarkan itu
+    history_path = HISTORY_DIR / history_filename if history_filename else DEFAULT_HISTORY_FILE
+    status_map, processed_ids_from_history = load_history_data(history_path)
+
+    initial_total = len(all_members)
+    if retry_failed_only:
+        failed_statuses = {'failed', 'privacy_restricted', 'banned', 'invite_limit_reached', 'rpc_error', 'general_error', 'banned_in_supergroup'}
+        all_members = [
+            member for member in all_members 
+            if status_map.get(member[0]) in failed_statuses
+        ]
+        await event.reply(f"🔄 **Mode Retry Gagal:** Menargetkan **{len(all_members)}** dari **{initial_total}** pengguna yang sebelumnya gagal (berdasarkan `{history_path.name}`).")
+    else:
+        all_members = [
+            member for member in all_members 
+            if member[0] not in processed_ids_from_history
+        ]
+        if initial_total > 0:
+             await event.reply(f"ℹ️ **Filter Riwayat:** Dari **{initial_total}** pengguna, **{len(all_members)}** akan diproses. Sisanya (`{initial_total - len(all_members)}`) sudah ada di riwayat (`{history_path.name}`).")
+
+    if not all_members:
+        await event.reply("✅ Tidak ada pengguna baru untuk diproses. Semua target sudah ada di riwayat atau tidak cocok dengan filter.")
+        return
+
+    # Buat pesan status awal
+    await event.reply(
+        f"**Tugas Dimulai**\n\n"
+        f"👥 **Total Pengguna untuk Diproses:** {len(all_members)}\n"
+        f"📂 **File Riwayat:** `{history_path.name}`"
+    )
+
     while True: # Loop utama untuk siklus harian
         for i, session_name in enumerate(session_names):
             session_name = session_name.strip() # Hapus spasi
@@ -1126,13 +1191,16 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
 
             user_client = TelegramClient(str(session_path), API_ID, API_HASH)
             
-            stop_reason, processed_this_run, stats_this_run = await run_broadcast(
+            stop_reason, processed_this_run, stats_this_run, logs_this_run = await run_broadcast(
                 event, user_client, session_name, target_str, delay_minutes, 
-                invite_link, excel_file_path=source_excel_path, mode=mode, 
+                invite_link, member_list=all_members, source_filename=Path(source_excel_path).name,
+                mode=mode, 
                 skip_user_ids=globally_processed_ids,
                 max_users_per_session=max_users_per_session
             )
 
+            if logs_this_run:
+                all_history_logs.extend(logs_this_run)
             if processed_this_run:
                 globally_processed_ids.update(processed_this_run)
             
@@ -1181,15 +1249,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         # --- AKHIR DARI SIKLUS (SEMUA AKUN TELAH DIGUNAKAN SEKALI) ---
 
         # Cek apakah tugas sudah selesai sepenuhnya
-        try:
-            wb = openpyxl.load_workbook(source_excel_path)
-            ws = wb.active
-            total_users_in_file = sum(1 for row in ws.iter_rows(min_row=2) if any(cell.value for cell in row))
-        except Exception as e:
-            await event.reply(f"❌ Gagal membaca ulang file Excel untuk penjadwalan harian. Tugas dihentikan. Error: {e}")
-            break
-
-        if len(globally_processed_ids) >= total_users_in_file:
+        if len(globally_processed_ids) >= len(all_members):
             print("[INFO] Tugas selesai, semua pengguna telah diproses.")
             break # Keluar dari loop `while True` untuk membuat laporan akhir
 
@@ -1211,13 +1271,16 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         await event.reply(
             f"🏁 **Siklus Harian Selesai** 🏁\n\n"
             f"Semua akun telah menyelesaikan tugasnya untuk hari ini.\n"
-            f"Pengguna tersisa untuk diproses: **{total_users_in_file - len(globally_processed_ids)}**\n\n"
+            f"Pengguna tersisa untuk diproses: **{len(all_members) - len(globally_processed_ids)}**\n\n"
             f"Tugas akan dilanjutkan secara otomatis besok pada pukul **{resume_time.strftime('%H:%M')}** (dalam ~{wait_duration_str})."
         )
         await asyncio.sleep(wait_seconds)
         await event.reply("▶️ **Melanjutkan Tugas Harian Terjadwal...**")
         is_first_run = True # Reset agar pesan "melanjutkan dengan..." tidak muncul di akun pertama
 
+    # Simpan semua log yang terkumpul ke file riwayat
+    append_logs_to_history(history_path, all_history_logs)
+    
     # Kirim laporan akhir gabungan setelah semua proses selesai
     elapsed_time = datetime.now() - start_time
     final_summary_text = (
@@ -1240,6 +1303,18 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
 async def addgrup_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
+
+    # Parsing untuk riwayat
+    history_filename = None
+    history_arg = next((arg for arg in args if arg.lower().startswith('history=')), None)
+    if history_arg:
+        history_filename = history_arg.split('=', 1)[1]
+        args.remove(history_arg)
+
+    # Parsing untuk retry
+    retry_failed_only = 'retry=failed' in [arg.lower() for arg in args]
+    if retry_failed_only:
+        args = [arg for arg in args if arg.lower() != 'retry=failed']
 
     # Parsing untuk file spesifik
     excel_file_path = None
@@ -1294,12 +1369,24 @@ async def addgrup_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode='default', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task, history_filename=history_filename, retry_failed_only=retry_failed_only))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupfast (.*)'))
 async def addgrupfast_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
+
+    # Parsing untuk riwayat
+    history_filename = None
+    history_arg = next((arg for arg in args if arg.lower().startswith('history=')), None)
+    if history_arg:
+        history_filename = history_arg.split('=', 1)[1]
+        args.remove(history_arg)
+
+    # Parsing untuk retry
+    retry_failed_only = 'retry=failed' in [arg.lower() for arg in args]
+    if retry_failed_only:
+        args = [arg for arg in args if arg.lower() != 'retry=failed']
 
     # Parsing untuk file spesifik
     excel_file_path = None
@@ -1345,12 +1432,24 @@ async def addgrupfast_handler(event):
         await event.reply("❌ **Format Salah!**\nNama sesi tidak boleh kosong.")
         return
 
-    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task))
+    asyncio.create_task(run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link=None, mode='fast', excel_file_path=excel_file_path, start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task, history_filename=history_filename, retry_failed_only=retry_failed_only))
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrupexcel (.*)'))
 async def addgrupexcel_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     args = [arg for arg in event.pattern_match.group(1).split(' ') if arg]
+
+    # Parsing untuk riwayat
+    history_filename = None
+    history_arg = next((arg for arg in args if arg.lower().startswith('history=')), None)
+    if history_arg:
+        history_filename = history_arg.split('=', 1)[1]
+        args.remove(history_arg)
+
+    # Parsing untuk retry
+    retry_failed_only = 'retry=failed' in [arg.lower() for arg in args]
+    if retry_failed_only:
+        args = [arg for arg in args if arg.lower() != 'retry=failed']
 
     # Parsing baru untuk argumen limit opsional
     max_users_per_session = None
@@ -1416,7 +1515,8 @@ async def addgrupexcel_handler(event):
             asyncio.create_task(run_pooled_broadcast_task(
                 event, session_names, target_str, delay_minutes, 
                 invite_link, mode='default', excel_file_path=download_path, 
-                start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task
+                start_message_id=event.message.id, max_users_per_session=max_users_per_session, daily=is_daily_task,
+                history_filename=history_filename, retry_failed_only=retry_failed_only
             ))
     except asyncio.TimeoutError:
         await event.reply("⏱️ Waktu tunggu untuk unggah file habis. Proses dibatalkan.")
