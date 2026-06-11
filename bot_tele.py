@@ -836,8 +836,10 @@ Berikut adalah format dan contoh perintah yang tersedia.
 ` /accounts `
 *Fungsi:* Menampilkan semua akun yang tersimpan.
 
-` /stop <nama_sesi> `
-*Contoh:* `/stop akun1`
+` /stop [nama_sesi] `
+*Fungsi:* Menghentikan proses yang berjalan. Jika `nama_sesi` diberikan, hanya tugas untuk sesi itu yang dihentikan. Jika tidak, semua tugas akan dihentikan.
+*Contoh 1 (spesifik):* `/stop akun1`
+*Contoh 2 (semua):* `/stop`
 
 ` /leavegroup `
 *Fungsi:* Memerintahkan bot keluar dari grup ini.
@@ -866,11 +868,18 @@ async def login_handler(event):
     # Buat instance klien, tetapi jangan hubungkan dulu.
     temp_client = TelegramClient(str(session_path), API_ID, API_HASH)
     try:
-        await event.reply(f"Memulai proses login untuk sesi `{session_name}`...\n\n⏱️ Silakan balas pesan ini dengan data yang diminta.")
-        print(f"[DEBUG] login_handler: Memulai untuk sesi '{session_name}'")
+        # Beri tahu admin di grup bahwa proses akan dilanjutkan di DM
+        try:
+            await bot_client.send_message(ADMIN_ID, f"Memulai proses login untuk sesi `{session_name}`...")
+            await event.reply("✅ Perintah diterima. Silakan periksa chat pribadi Anda untuk melanjutkan proses login.")
+        except Exception as e:
+            await event.reply(f"❌ Gagal memulai percakapan pribadi dengan Anda (Admin). Pastikan Anda tidak memblokir bot ini.\nError: `{e}`")
+            return
 
-        # Gunakan loop untuk menangani respons dengan lebih robust
-        async with bot_client.conversation(event.chat_id, timeout=300) as conv:
+        print(f"[DEBUG] login_handler: Memulai untuk sesi '{session_name}' di DM admin.")
+
+        # Gunakan loop untuk menangani respons dengan lebih robust di chat pribadi admin
+        async with bot_client.conversation(ADMIN_ID, timeout=300) as conv:
             # Langkah 1: Dapatkan nomor telepon dari pengguna
             await conv.send_message("📱 Silakan masukkan nomor telepon Anda (format internasional, cth: `+628123456789`):")
             print("[DEBUG] login_handler: Menunggu nomor telepon dari user...")
@@ -879,6 +888,7 @@ async def login_handler(event):
                 phone_response = await asyncio.wait_for(conv.get_response(), timeout=120)
             except asyncio.TimeoutError:
                 await conv.send_message("⏱️ Waktu tunggu untuk nomor telepon habis. Coba lagi dengan /login")
+                await event.reply("❌ Proses login dibatalkan karena waktu tunggu habis di chat pribadi.")
                 return
             
             phone_number = phone_response.text.strip()
@@ -902,15 +912,18 @@ async def login_handler(event):
             except asyncio.TimeoutError:
                 print(f"[ERROR] login_handler: Timeout saat mengirim kode")
                 await conv.send_message(f"⏱️ Timeout saat mengirim kode. Coba lagi nanti.")
+                await event.reply("❌ Proses login gagal (timeout saat kirim kode).")
                 return
             except FloodWaitError as fwe:
                 print(f"[ERROR] login_handler: Flood wait error: {fwe.seconds} detik")
                 await conv.send_message(f"⚠️ Terlalu banyak percobaan. Tunggu {fwe.seconds} detik sebelum mencoba lagi.")
+                await event.reply(f"❌ Proses login gagal (terkena Flood Wait).")
                 return
             except Exception as e:
                 print(f"[ERROR] login_handler: Gagal mengirim kode: {e}")
                 traceback.print_exc()
                 await conv.send_message(f"❌ Gagal mengirim kode:\n`{str(e)}`\n\nCoba lagi nanti atau hubungi support.")
+                await event.reply(f"❌ Proses login gagal. Detail error ada di chat pribadi.")
                 return
             finally:
                 if temp_client.is_connected():
@@ -925,6 +938,7 @@ async def login_handler(event):
                 code_response = await asyncio.wait_for(conv.get_response(), timeout=300)
             except asyncio.TimeoutError:
                 await conv.send_message("⏱️ Waktu tunggu untuk kode verifikasi habis. Coba lagi dengan /login")
+                await event.reply("❌ Proses login dibatalkan karena waktu tunggu habis di chat pribadi.")
                 return
                 
             verification_code = code_response.text.strip()
@@ -950,6 +964,7 @@ async def login_handler(event):
                         password_response = await asyncio.wait_for(conv.get_response(), timeout=300)
                     except asyncio.TimeoutError:
                         await conv.send_message("⏱️ Waktu tunggu untuk password habis. Coba lagi dengan /login")
+                        await event.reply("❌ Proses login dibatalkan karena waktu tunggu habis di chat pribadi.")
                         return
                     
                     password = password_response.text.strip()
@@ -963,23 +978,29 @@ async def login_handler(event):
                 me = await temp_client.get_me()
                 print(f"[INFO] login_handler: Berhasil login sebagai {me.first_name}. Sesi '{session_name}' disimpan.")
                 await conv.send_message(f"✅ **Login Berhasil!**\n\n👤 Nama: **{me.first_name}**\n📋 Username: `@{me.username or 'N/A'}`\n🔢 ID: `{me.id}`\n\n📱 Sesi disimpan sebagai: `{session_name}`")
+                await event.reply(f"✅ Sesi `{session_name}` berhasil disimpan.")
                 
             except (ValueError, RPCError) as e:
                 print(f"[ERROR] login_handler: Error saat sign-in: {e}")
                 await conv.send_message(f"❌ Kode atau password salah:\n`{str(e)}`")
+                await event.reply(f"❌ Proses login gagal untuk sesi `{session_name}`. Detail error ada di chat pribadi.")
                 return
             except asyncio.TimeoutError:
                 print(f"[ERROR] login_handler: Timeout saat sign-in")
                 await conv.send_message(f"⏱️ Timeout saat sign-in. Coba lagi dengan /login")
+                await event.reply(f"❌ Proses login gagal untuk sesi `{session_name}` (timeout).")
                 return
             except Exception as e:
                 print(f"[ERROR] login_handler: Error sign-in: {e}")
                 traceback.print_exc()
                 await conv.send_message(f"❌ Error saat login:\n`{str(e)}`")
+                await event.reply(f"❌ Proses login gagal untuk sesi `{session_name}`. Detail error ada di chat pribadi.")
                 return
     except asyncio.TimeoutError:
         print("[ERROR] login_handler: Proses login timeout (300 detik).")
-        await event.reply("⏱️ Waktu login habis. Silakan coba lagi dengan /login")
+        # Pesan ini mungkin tidak terkirim jika conversation sudah timeout, tapi kita coba.
+        # Pesan utama akan dikirim di dalam blok conversation.
+        await event.reply("⏱️ Waktu login habis (total 5 menit). Silakan coba lagi dengan /login")
     except Exception as e:
         print(f"[ERROR] login_handler: Terjadi error tak terduga: {e}")
         traceback.print_exc()
@@ -1572,7 +1593,7 @@ async def status_handler(event):
         message += f"🔹 Akun: `{session}` | Tugas: `{task_name}`\n"
     await event.reply(message)
 
-@bot_client.on(events.NewMessage(pattern=r'/stop (\w+)'))
+@bot_client.on(events.NewMessage(pattern=r'/stop(?: (\w+))?'))
 async def stop_handler(event):
     print(f"[INFO] Perintah '{event.raw_text}' dari user {event.sender_id} di chat {event.chat_id}")
     # Check if user is admin
@@ -1581,12 +1602,27 @@ async def stop_handler(event):
         return
 
     session_name = event.pattern_match.group(1)
-    if not TASK_STATE.get(session_name, {}).get("running"):
-        await event.reply(f"⏹️ Tidak ada proses yang berjalan untuk akun `{session_name}`.")
-        return
 
-    TASK_STATE[session_name]["stop_requested"] = True
-    await event.reply(f"⏳ Perintah stop telah dikirim untuk tugas di akun `{session_name}`. Proses akan berhenti pada iterasi berikutnya.")
+    if session_name:
+        # Hentikan tugas spesifik
+        if not TASK_STATE.get(session_name, {}).get("running"):
+            await event.reply(f"⏹️ Tidak ada proses yang berjalan untuk akun `{session_name}`.")
+            return
+
+        TASK_STATE[session_name]["stop_requested"] = True
+        await event.reply(f"⏳ Perintah stop telah dikirim untuk tugas di akun `{session_name}`. Proses akan berhenti pada iterasi berikutnya.")
+    else:
+        # Hentikan semua tugas
+        running_tasks = [s for s, data in TASK_STATE.items() if data.get("running")]
+        if not running_tasks:
+            await event.reply("⏹️ Tidak ada proses yang sedang berjalan saat ini.")
+            return
+
+        for s_name in running_tasks:
+            if TASK_STATE.get(s_name):
+                TASK_STATE[s_name]["stop_requested"] = True
+        
+        await event.reply(f"⏳ Perintah stop telah dikirim untuk semua ({len(running_tasks)}) tugas yang berjalan. Proses akan berhenti pada iterasi berikutnya.")
 
 @bot_client.on(events.NewMessage(pattern='/leavegroup'))
 async def leavegroup_handler(event):
