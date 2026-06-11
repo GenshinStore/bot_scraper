@@ -491,8 +491,8 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
         if user_client.is_connected():
             await user_client.disconnect()
         
-        # Kembalikan log agar bisa digabungkan oleh pool manager
-        return stop_reason_code, processed_ids_this_run, stats, history_log
+    # Kembalikan log agar bisa digabungkan oleh pool manager
+    return stop_reason_code, processed_ids_this_run, stats, history_log
 
 async def scrape_group_members(user_client, group_entity):
     """Scrape anggota dari satu grup."""
@@ -1035,15 +1035,24 @@ async def accounts_handler(event):
         session_name = session_file.stem
         temp_client = TelegramClient(str(session_file.resolve()), API_ID, API_HASH)
         
-        try:
-            await asyncio.wait_for(temp_client.connect(), timeout=15)
-            if await temp_client.is_user_authorized():
-                me = await temp_client.get_me()
-                phone = f"+{me.phone}" if me.phone else "N/A"
-                username = f"@{me.username}" if me.username else "N/A"
-                message_lines.append(f"{i}. **{session_name}**\n   - Nama: `{me.first_name}`\n   - Username: `{username}`\n   - No. HP: `{phone}`")
-            else:
-                message_lines.append(f"{i}. **{session_name}**\n   - Status: `Sesi tidak valid/perlu login ulang`")
+        try:            
+            async def check_account_status():
+                """Fungsi helper untuk menghubungkan, memeriksa otorisasi, dan mendapatkan info user."""
+                await temp_client.connect()
+                if await temp_client.is_user_authorized():
+                    me = await temp_client.get_me()
+                    phone = f"+{me.phone}" if me.phone else "N/A"
+                    username = f"@{me.username}" if me.username else "N/A"
+                    return f"{i}. **{session_name}**\n   - Nama: `{me.first_name}`\n   - Username: `{username}`\n   - No. HP: `{phone}`"
+                else:
+                    return f"{i}. **{session_name}**\n   - Status: `Sesi tidak valid/perlu login ulang`"
+
+            # Bungkus seluruh proses pengecekan dalam satu timeout
+            result_line = await asyncio.wait_for(check_account_status(), timeout=20.0)
+            message_lines.append(result_line)
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Timeout saat memeriksa akun {session_name}")
+            message_lines.append(f"{i}. **{session_name}**\n   - Status: `Timeout saat menghubungkan`")
         except Exception as e:
             print(f"[ERROR] Gagal memeriksa akun {session_name}: {e}")
             message_lines.append(f"{i}. **{session_name}**\n   - Status: `Gagal terhubung atau sesi korup`")
