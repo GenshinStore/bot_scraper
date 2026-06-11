@@ -1022,8 +1022,9 @@ async def accounts_handler(event):
         await event.reply("❌ Anda tidak memiliki izin untuk menggunakan perintah ini.")
         return
 
-    session_files = list(Path(SESSIONS_DIR).glob('*.session'))
-    if not session_files:
+    # Filter sesi bot itu sendiri untuk menghindari error 'database is locked'
+    session_files = [f for f in Path(SESSIONS_DIR).glob('*.session') if f.stem != BOT_SESSION_NAME]
+    if not session_files: # Sekarang ini hanya akan kosong jika tidak ada sesi USER
         await event.reply("Tidak ada akun user yang tersimpan. Gunakan `/login <nama_sesi>` untuk menambahkan.")
         return
 
