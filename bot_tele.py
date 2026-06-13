@@ -149,11 +149,11 @@ async def add_user_to_group(user_client, target_group, user_id, user_username=No
         # Cek tipe grup untuk menggunakan request yang benar
         if isinstance(target_group, Channel): # Ini adalah Supergroup
             await user_client(InviteToChannelRequest(channel=target_group, users=[user_to_add]))
-            return True, "Berhasil ditambahkan (Supergroup)"
+            return True, "Undangan terkirim" # Di supergrup, ini adalah undangan, bukan penambahan paksa.
         elif isinstance(target_group, Chat): # Ini adalah Grup Dasar
             from telethon.tl.functions.messages import AddChatUserRequest
             await user_client(AddChatUserRequest(chat_id=target_group.id, user_id=user_to_add, fwd_limit=10))
-            return True, "Berhasil ditambahkan (Grup Dasar)"
+            return True, "Berhasil ditambahkan" # Di grup dasar, ini biasanya penambahan langsung.
         else:
             return False, "Tipe grup tidak didukung"
 
@@ -169,9 +169,19 @@ async def add_user_to_group(user_client, target_group, user_id, user_username=No
             return False, "INVITE_LIMIT_REACHED" # Kode untuk limit undangan akun
         elif "banned from sending messages" in error_msg:
             return False, "BANNED_IN_SUPERGROUP" # Kode untuk akun di-ban dari grup
+        elif "could not find the input entity" in error_msg:
+            return False, "ENTITY_NOT_FOUND"
+        elif "chat_admin_required" in error_msg:
+            return False, "ADMIN_REQUIRED"
+        elif "user_banned_in_channel" in error_msg:
+            return False, "USER_IS_BANNED"
+        elif "chat_full" in error_msg:
+            return False, "GROUP_IS_FULL"
         else:
             return False, f"RPC_ERROR:{e}" # Kode untuk error RPC lainnya
     except Exception as e:
+        if "could not find the input entity" in str(e).lower():
+            return False, "ENTITY_NOT_FOUND"
         return False, f"GENERAL_ERROR:{e}" # Kode untuk error umum
 
 async def send_group_link(user_client, user_id, user_username, target_entity, custom_invite_link=None):
@@ -352,11 +362,12 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
 
                     if success:
                         stats['added'] += 1
-                        last_status_text = f"✅ {current_user_display}: Berhasil ditambahkan."
+                        # PERUBAHAN: Gunakan reason_code untuk status yang lebih akurat
+                        last_status_text = f"✅ {current_user_display}: {reason_code}."
                         sleep_after_action = True
                         existing_member_ids.add(uid) # Tambahkan ke set agar tidak diproses lagi
-                        status_code = "added"
-                        status_detail = "Successfully added to group."
+                        status_code = "added" # Kode internal tetap 'added' untuk konsistensi riwayat
+                        status_detail = f"Success: {reason_code}"
                     elif reason_code == "PRIVACY_RESTRICTED":
                         # Mode 'fast' akan melewati user dengan privasi, mode 'default' akan mencoba kirim link.
                         if mode == 'fast':
@@ -412,6 +423,26 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                             status_detail = "Account invite limit reached or too many requests."
                             stop_reason_code = 'flood_wait' # Perlakukan sebagai flood wait agar pool beralih akun
                             break # Hentikan loop untuk akun ini
+                        elif reason_code == "ENTITY_NOT_FOUND":
+                            stats['failed'] += 1
+                            last_status_text = f"❓ {current_user_display}: Gagal (User tidak dikenal)."
+                            status_code = "failed"
+                            status_detail = "Entity not found. The adding account may not know this user (not in contacts, no mutual groups)."
+                        elif reason_code == "USER_IS_BANNED":
+                            stats['failed'] += 1
+                            last_status_text = f"🚫 {current_user_display}: Gagal (User di-ban dari grup)."
+                            status_code = "failed"
+                            status_detail = "The target user is banned in the destination group."
+                        elif reason_code == "ADMIN_REQUIRED":
+                            await event.reply(f"🛑 **HAK ADMIN DIPERLUKAN!**\n\nAkun `{session_name}` tidak memiliki hak admin untuk mengundang anggota ke grup target. Proses untuk akun ini dihentikan.")
+                            status_detail = "The account lacks admin privileges to invite users."
+                            stop_reason_code = 'admin_required'
+                            break
+                        elif reason_code == "GROUP_IS_FULL":
+                            await event.reply(f"🛑 **GRUP PENUH!**\n\nTarget grup **{target_entity.title}** sudah penuh. Tidak bisa menambahkan anggota lagi. Proses dihentikan.")
+                            status_detail = "The target group is full."
+                            stop_reason_code = 'group_full'
+                            break
                         else:
                             stats['failed'] += 1
                             last_status_text = f"❌ {current_user_display}: Gagal ({reason_code})."
@@ -439,7 +470,7 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                 f"🔄 **Broadcast Berjalan...** ({i}/{total_users})\n\n"
                 f"**Status Terakhir:**\n{last_status_text}\n\n"
                 f"--- **Statistik Total** ---\n"
-                f"✅ **Berhasil Ditambahkan:** {stats['added']}\n"
+                f"✅ **Sukses (Tambah/Undang):** {stats['added']}\n"
                 f"🔗 **Link Terkirim:** {stats['link_sent']}\n"
                 f"⏩ **Dilewati (Privasi):** {stats['skipped_privacy']}\n"
                 f"👥 **Sudah Jadi Anggota:** {stats['already_member']}\n"
@@ -1318,7 +1349,7 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
         f"📊 **--- Laporan Akhir Gabungan ---** 📊\n\n"
         f"**Akun yang Digunakan:** {', '.join(f'`{s}`' for s in accounts_used)}\n\n"
         f"--- **Hasil Total** ---\n"
-        f"✅ **Berhasil Ditambahkan:** {total_stats['added']}\n"
+        f"✅ **Sukses (Tambah/Undang):** {total_stats['added']}\n"
         f"🔗 **Link Terkirim:** {total_stats['link_sent']}\n"
         f"⏩ **Dilewati (Privasi):** {total_stats['skipped_privacy']}\n"
         f"👥 **Sudah Jadi Anggota:** {total_stats['already_member']}\n"
