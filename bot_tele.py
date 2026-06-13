@@ -222,6 +222,28 @@ async def send_group_link(user_client, user_id, user_username, target_entity, cu
     except Exception as e:
         return False, f"Error kirim link: {e}"
 
+async def cancellable_sleep(duration_seconds, task_id_to_check):
+    """
+    Sleeps for a given duration, but wakes up periodically to check for a stop request.
+    The task_id_to_check is the key in the global TASK_STATE dictionary.
+    Returns True if stopped, False if completed sleep.
+    """
+    end_time = asyncio.get_event_loop().time() + duration_seconds
+    while asyncio.get_event_loop().time() < end_time:
+        # Check for stop request
+        if TASK_STATE.get(task_id_to_check, {}).get("stop_requested"):
+            print(f"[INFO] Sleep cancelled for task {task_id_to_check}.")
+            return True # Stopped
+
+        # Sleep for a short interval
+        remaining_time = end_time - asyncio.get_event_loop().time()
+        sleep_interval = min(15, remaining_time) # Sleep for 15s or remaining time
+        if sleep_interval <= 0:
+            break
+        await asyncio.sleep(sleep_interval)
+    
+    return False # Completed
+
 async def run_broadcast(event, user_client, session_name, target_str, delay_minutes, invite_link, member_list, source_filename, mode='default', skip_user_ids=None, max_users_per_session=None):
     """Fungsi utama untuk menjalankan proses broadcast/add member."""
     TASK_STATE[session_name] = {
@@ -1150,6 +1172,14 @@ async def scrapergrup_handler(event):
 
 async def run_pooled_broadcast_task(event, session_names, target_str, delay_minutes, invite_link, mode, excel_file_path=None, start_message_id=None, max_users_per_session=None, daily=False, history_filename=None, retry_failed_only=False):
     """Manajer tugas yang menjalankan broadcast di beberapa akun secara berurutan."""
+    # Daftarkan tugas pool ini agar bisa dihentikan secara global
+    pool_task_id = f"pool_{event.chat_id}_{event.message.id}"
+    TASK_STATE[pool_task_id] = {
+        "running": True,
+        "task_name": f"addgrup_pool ({', '.join(session_names)})",
+        "stop_requested": False,
+    }
+
     globally_processed_ids = set()
     is_first_run = True
     total_stats = {'processed': 0, 'added': 0, 'link_sent': 0, 'failed': 0, 'already_member': 0, 'skipped_privacy': 0}
@@ -1157,209 +1187,213 @@ async def run_pooled_broadcast_task(event, session_names, target_str, delay_minu
     all_history_logs = [] # Kumpulkan semua log di sini
     start_time = datetime.now()
 
-    # LOGIKA BARU: Tentukan file Excel sumber SEKALI di awal, jika tidak disediakan.
-    # Ini memastikan semua akun dalam pool menggunakan file yang sama.
-    source_excel_path = excel_file_path
-    if not source_excel_path:
-        try:
-            # LOGIKA BARU: Cari file scrape APAPUN yang paling baru, tidak terikat pada sesi tertentu.
-            search_pattern = "hasil_scraper_*.xlsx"
-            files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
-            if not files:
-                await event.reply(
-                    f"❌ **File Scrape Tidak Ditemukan!**\n\n"
-                    f"Saya tidak dapat menemukan file hasil scrape sama sekali di direktori bot.\n"
-                    f"Pastikan Anda telah menjalankan `/scraper` atau `/scrapergrup` terlebih dahulu.\n\n"
-                    f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
-                )
+    try:
+        # LOGIKA BARU: Tentukan file Excel sumber SEKALI di awal, jika tidak disediakan.
+        # Ini memastikan semua akun dalam pool menggunakan file yang sama.
+        source_excel_path = excel_file_path
+        if not source_excel_path:
+            try:
+                # LOGIKA BARU: Cari file scrape APAPUN yang paling baru, tidak terikat pada sesi tertentu.
+                search_pattern = "hasil_scraper_*.xlsx"
+                files = [(p, p.stat().st_mtime) for p in SCRIPT_DIR.glob(search_pattern)]
+                if not files:
+                    await event.reply(
+                        f"❌ **File Scrape Tidak Ditemukan!**\n\n"
+                        f"Saya tidak dapat menemukan file hasil scrape sama sekali di direktori bot.\n"
+                        f"Pastikan Anda telah menjalankan `/scraper` atau `/scrapergrup` terlebih dahulu.\n\n"
+                        f"(Pencarian dilakukan untuk file dengan pola: `{search_pattern}`)"
+                    )
+                    return
+                files.sort(key=lambda x: x[1], reverse=True)
+                source_excel_path = str(files[0][0])
+                await event.reply(f"ℹ️ Menggunakan file scrape terbaru yang ditemukan: `{Path(source_excel_path).name}`")
+            except Exception as e:
+                await event.reply(f"❌ Terjadi error saat mencari file scrape terbaru: {e}")
                 return
-            files.sort(key=lambda x: x[1], reverse=True)
-            source_excel_path = str(files[0][0])
-            await event.reply(f"ℹ️ Menggunakan file scrape terbaru yang ditemukan: `{Path(source_excel_path).name}`")
+
+        # Baca file sumber ke dalam memori
+        all_members = []
+        try:
+            wb = openpyxl.load_workbook(source_excel_path)
+            ws = wb.active
+            for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+                if not any(row): continue
+                if len(row) >= 3 and row[2]:
+                    try:
+                        uid = int(row[2])
+                        username = row[3] if len(row) > 3 else 'N/A'
+                        name = row[4] if len(row) > 4 else '(No Name)'
+                        all_members.append((uid, username, name))
+                    except (ValueError, TypeError):
+                        print(f"[WARNING] Melewati baris {i} di {Path(source_excel_path).name}: UID '{row[2]}' bukan angka yang valid.")
+                        continue
         except Exception as e:
-            await event.reply(f"❌ Terjadi error saat mencari file scrape terbaru: {e}")
+            await event.reply(f"❌ Gagal membaca file Excel sumber `{Path(source_excel_path).name}`. Error: {e}")
             return
 
-    # Baca file sumber ke dalam memori
-    all_members = []
-    try:
-        wb = openpyxl.load_workbook(source_excel_path)
-        ws = wb.active
-        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
-            if not any(row): continue
-            if len(row) >= 3 and row[2]:
-                try:
-                    uid = int(row[2])
-                    username = row[3] if len(row) > 3 else 'N/A'
-                    name = row[4] if len(row) > 4 else '(No Name)'
-                    all_members.append((uid, username, name))
-                except (ValueError, TypeError):
-                    print(f"[WARNING] Melewati baris {i} di {Path(source_excel_path).name}: UID '{row[2]}' bukan angka yang valid.")
+        # Tentukan path riwayat dan filter anggota berdasarkan itu
+        history_path = HISTORY_DIR / history_filename if history_filename else DEFAULT_HISTORY_FILE
+        status_map, processed_ids_from_history = load_history_data(history_path)
+
+        initial_total = len(all_members)
+        if retry_failed_only:
+            failed_statuses = {'failed', 'privacy_restricted', 'banned', 'invite_limit_reached', 'rpc_error', 'general_error', 'banned_in_supergroup'}
+            all_members = [
+                member for member in all_members 
+                if status_map.get(member[0]) in failed_statuses
+            ]
+            await event.reply(f"🔄 **Mode Retry Gagal:** Menargetkan **{len(all_members)}** dari **{initial_total}** pengguna yang sebelumnya gagal (berdasarkan `{history_path.name}`).")
+        else:
+            all_members = [
+                member for member in all_members 
+                if member[0] not in processed_ids_from_history
+            ]
+            if initial_total > 0:
+                 await event.reply(f"ℹ️ **Filter Riwayat:** Dari **{initial_total}** pengguna, **{len(all_members)}** akan diproses. Sisanya (`{initial_total - len(all_members)}`) sudah ada di riwayat (`{history_path.name}`).")
+
+        if not all_members:
+            await event.reply("✅ Tidak ada pengguna baru untuk diproses. Semua target sudah ada di riwayat atau tidak cocok dengan filter.")
+            return
+
+        # Buat pesan status awal
+        await event.reply(
+            f"**Tugas Dimulai**\n\n"
+            f"👥 **Total Pengguna untuk Diproses:** {len(all_members)}\n"
+            f"📂 **File Riwayat:** `{history_path.name}`"
+        )
+
+        while True: # Loop utama untuk siklus harian
+            stop_cycle = False
+            if TASK_STATE.get(pool_task_id, {}).get("stop_requested"):
+                break
+
+            for i, session_name in enumerate(session_names):
+                session_name = session_name.strip() # Hapus spasi
+                if not session_name: continue
+
+                if TASK_STATE.get(pool_task_id, {}).get("stop_requested"):
+                    stop_cycle = True
+                    break
+
+                if TASK_STATE.get(session_name, {}).get("running"):
+                    await event.reply(f"⚠️ Melewati akun `{session_name}` karena sedang menjalankan tugas lain.")
                     continue
-    except Exception as e:
-        await event.reply(f"❌ Gagal membaca file Excel sumber `{Path(source_excel_path).name}`. Error: {e}")
-        return
 
-    # Tentukan path riwayat dan filter anggota berdasarkan itu
-    history_path = HISTORY_DIR / history_filename if history_filename else DEFAULT_HISTORY_FILE
-    status_map, processed_ids_from_history = load_history_data(history_path)
+                if not is_first_run:
+                    await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
+                is_first_run = False
+                if session_name not in accounts_used:
+                    accounts_used.append(session_name)
 
-    initial_total = len(all_members)
-    if retry_failed_only:
-        failed_statuses = {'failed', 'privacy_restricted', 'banned', 'invite_limit_reached', 'rpc_error', 'general_error', 'banned_in_supergroup'}
-        all_members = [
-            member for member in all_members 
-            if status_map.get(member[0]) in failed_statuses
-        ]
-        await event.reply(f"🔄 **Mode Retry Gagal:** Menargetkan **{len(all_members)}** dari **{initial_total}** pengguna yang sebelumnya gagal (berdasarkan `{history_path.name}`).")
-    else:
-        all_members = [
-            member for member in all_members 
-            if member[0] not in processed_ids_from_history
-        ]
-        if initial_total > 0:
-             await event.reply(f"ℹ️ **Filter Riwayat:** Dari **{initial_total}** pengguna, **{len(all_members)}** akan diproses. Sisanya (`{initial_total - len(all_members)}`) sudah ada di riwayat (`{history_path.name}`).")
+                session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
+                if not session_path.exists():
+                    await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Melewati...")
+                    continue
 
-    if not all_members:
-        await event.reply("✅ Tidak ada pengguna baru untuk diproses. Semua target sudah ada di riwayat atau tidak cocok dengan filter.")
-        return
+                user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+                
+                stop_reason, processed_this_run, stats_this_run, logs_this_run = await run_broadcast(
+                    event, user_client, session_name, target_str, delay_minutes, 
+                    invite_link, member_list=all_members, source_filename=Path(source_excel_path).name,
+                    mode=mode, 
+                    skip_user_ids=globally_processed_ids,
+                    max_users_per_session=max_users_per_session
+                )
 
-    # Buat pesan status awal
-    await event.reply(
-        f"**Tugas Dimulai**\n\n"
-        f"👥 **Total Pengguna untuk Diproses:** {len(all_members)}\n"
-        f"📂 **File Riwayat:** `{history_path.name}`"
-    )
+                if logs_this_run:
+                    all_history_logs.extend(logs_this_run)
+                if processed_this_run:
+                    globally_processed_ids.update(processed_this_run)
+                
+                if stats_this_run:
+                    for key in total_stats:
+                        total_stats[key] += stats_this_run.get(key, 0)
 
-    while True: # Loop utama untuk siklus harian
-        for i, session_name in enumerate(session_names):
-            session_name = session_name.strip() # Hapus spasi
-            if not session_name: continue
-
-            if TASK_STATE.get(session_name, {}).get("running"):
-                await event.reply(f"⚠️ Melewati akun `{session_name}` karena sedang menjalankan tugas lain.")
-                continue
-
-            if not is_first_run:
-                await event.reply(f"▶️ Melanjutkan tugas dengan akun berikutnya: `{session_name}`")
-            is_first_run = False
-            if session_name not in accounts_used:
-                accounts_used.append(session_name)
-
-            session_path = Path(SESSIONS_DIR) / f"{session_name}.session"
-            if not session_path.exists():
-                await event.reply(f"❌ Sesi `{session_name}` tidak ditemukan. Melewati...")
-                continue
-
-            user_client = TelegramClient(str(session_path), API_ID, API_HASH)
+                if stop_reason == 'completed':
+                    await event.reply(f"🎉 Semua pengguna dalam file telah diproses dengan sukses menggunakan akun `{session_name}`.")
+                    stop_cycle = True
+                    break
+                elif stop_reason == 'stopped_by_user':
+                    stop_cycle = True
+                    break
+                elif stop_reason in ('daily_limit_reached', 'flood_wait', 'banned', 'error'):
+                    if i < len(session_names) - 1:
+                        await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
+                        was_stopped = await cancellable_sleep(delay_minutes * 60, pool_task_id)
+                        if was_stopped:
+                            stop_cycle = True
+                            break
+                        continue
+                    else:
+                        # Akun terakhir juga mencapai limit/error, akhir dari siklus hari ini
+                        break
             
-            stop_reason, processed_this_run, stats_this_run, logs_this_run = await run_broadcast(
-                event, user_client, session_name, target_str, delay_minutes, 
-                invite_link, member_list=all_members, source_filename=Path(source_excel_path).name,
-                mode=mode, 
-                skip_user_ids=globally_processed_ids,
-                max_users_per_session=max_users_per_session
+            # --- AKHIR DARI SIKLUS (SEMUA AKUN TELAH DIGUNAKAN SEKALI) ---
+            if stop_cycle or TASK_STATE.get(pool_task_id, {}).get("stop_requested"):
+                await event.reply("⏹️ Tugas dihentikan oleh pengguna.")
+                break
+
+            # Cek apakah tugas sudah selesai sepenuhnya
+            if len(globally_processed_ids) >= len(all_members):
+                print("[INFO] Tugas selesai, semua pengguna telah diproses.")
+                break # Keluar dari loop `while True` untuk membuat laporan akhir
+
+            # Jika bukan tugas harian, berhenti setelah satu siklus
+            if not daily:
+                print("[INFO] Tugas sekali jalan selesai.")
+                break
+
+            # --- LOGIKA JEDA HARIAN ---
+            now = datetime.now()
+            resume_time = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            wait_seconds = (resume_time - now).total_seconds()
+            hours, remainder = divmod(int(wait_seconds), 3600)
+            minutes, _ = divmod(remainder, 60)
+            wait_duration_str = f"{hours} jam {minutes} menit"
+
+            await event.reply(
+                f"🏁 **Siklus Harian Selesai** 🏁\n\n"
+                f"Semua akun telah menyelesaikan tugasnya untuk hari ini.\n"
+                f"Pengguna tersisa untuk diproses: **{len(all_members) - len(globally_processed_ids)}**\n\n"
+                f"Tugas akan dilanjutkan secara otomatis pada **{resume_time.strftime('%d-%m-%Y %H:%M')}** (dalam ~{wait_duration_str})."
             )
 
-            if logs_this_run:
-                all_history_logs.extend(logs_this_run)
-            if processed_this_run:
-                globally_processed_ids.update(processed_this_run)
-            
-            if stats_this_run:
-                for key in total_stats:
-                    total_stats[key] += stats_this_run.get(key, 0)
+            was_stopped_daily = await cancellable_sleep(wait_seconds, pool_task_id)
+            if was_stopped_daily:
+                await event.reply("⏹️ Jeda harian dihentikan oleh pengguna.")
+                break
 
-            if stop_reason == 'completed':
-                await event.reply(f"🎉 Semua pengguna dalam file telah diproses dengan sukses menggunakan akun `{session_name}`.")
-                # Keluar dari kedua loop untuk membuat laporan akhir
-                break # Keluar dari for loop
-            elif stop_reason == 'stopped_by_user':
-                await event.reply(f"⏹️ Tugas dihentikan oleh pengguna. Pool dihentikan.")
-                return
-            elif stop_reason == 'daily_limit_reached':
-                if i < len(session_names) - 1:
-                    await event.reply(f"ℹ️ Batas proses untuk `{session_name}` tercapai.")
-                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
-                    await asyncio.sleep(delay_minutes * 60)
-                    continue
-                else:
-                    # Akun terakhir juga mencapai limit, akhir dari siklus hari ini
-                    break # Keluar dari for loop untuk evaluasi harian
-            elif stop_reason == 'flood_wait' or stop_reason == 'banned':
-                if i < len(session_names) - 1:
-                    if stop_reason == 'flood_wait':
-                        await event.reply(f"🔁 Akun `{session_name}` terkena limit.")
-                    else: # banned
-                        await event.reply(f"🔁 Akun `{session_name}` di-ban dari grup.")
-                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
-                    await asyncio.sleep(delay_minutes * 60)
-                    continue
-                else:
-                    # Akun terakhir juga terkena limit, akhir dari siklus hari ini
-                    break # Keluar dari for loop untuk evaluasi harian
-            elif stop_reason == 'error':
-                if i < len(session_names) - 1:
-                    await event.reply(f"❌ Terjadi error pada `{session_name}`. Mencoba lanjut dengan akun berikutnya...")
-                    await event.reply(f"**Jeda {delay_minutes} menit sebelum beralih ke akun berikutnya...**")
-                    await asyncio.sleep(delay_minutes * 60)
-                    continue
-                else:
-                    await event.reply(f"❌ Terjadi error pada akun terakhir (`{session_name}`). Tugas dihentikan.")
-                    return
+            await event.reply("▶️ **Melanjutkan Tugas Harian Terjadwal...**")
+            is_first_run = True
+
+        # Simpan semua log yang terkumpul ke file riwayat
+        append_logs_to_history(history_path, all_history_logs)
         
-        # --- AKHIR DARI SIKLUS (SEMUA AKUN TELAH DIGUNAKAN SEKALI) ---
-
-        # Cek apakah tugas sudah selesai sepenuhnya
-        if len(globally_processed_ids) >= len(all_members):
-            print("[INFO] Tugas selesai, semua pengguna telah diproses.")
-            break # Keluar dari loop `while True` untuk membuat laporan akhir
-
-        # Jika bukan tugas harian, berhenti setelah satu siklus
-        if not daily:
-            print("[INFO] Tugas sekali jalan selesai.")
-            break
-
-        # Jika sampai di sini, artinya ini tugas harian dan belum selesai. Jeda sampai besok.
-        now = datetime.now()
-        resume_time = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-        wait_seconds = (resume_time - now).total_seconds()
-        
-        # Format durasi agar lebih mudah dibaca
-        hours, remainder = divmod(int(wait_seconds), 3600)
-        minutes, _ = divmod(remainder, 60)
-        wait_duration_str = f"{hours} jam {minutes} menit"
-
-        await event.reply(
-            f"🏁 **Siklus Harian Selesai** 🏁\n\n"
-            f"Semua akun telah menyelesaikan tugasnya untuk hari ini.\n"
-            f"Pengguna tersisa untuk diproses: **{len(all_members) - len(globally_processed_ids)}**\n\n"
-            f"Tugas akan dilanjutkan secara otomatis besok pada pukul **{resume_time.strftime('%H:%M')}** (dalam ~{wait_duration_str})."
+        # Kirim laporan akhir gabungan setelah semua proses selesai
+        elapsed_time = datetime.now() - start_time
+        final_summary_text = (
+            f"📊 **--- Laporan Akhir Gabungan ---** 📊\n\n"
+            f"**Akun yang Digunakan:** {', '.join(f'`{s}`' for s in accounts_used)}\n\n"
+            f"--- **Hasil Total** ---\n"
+            f"✅ **Sukses (Tambah/Undang):** {total_stats['added']}\n"
+            f"🔗 **Link Terkirim:** {total_stats['link_sent']}\n"
+            f"⏩ **Dilewati (Privasi):** {total_stats['skipped_privacy']}\n"
+            f"👥 **Sudah Jadi Anggota:** {total_stats['already_member']}\n"
+            f"❌ **Gagal:** {total_stats['failed']} (termasuk bot, error, & limit)\n\n"
+            f"⏱️ **Total Durasi Seluruh Tugas:** {str(elapsed_time).split('.')[0]}"
         )
-        await asyncio.sleep(wait_seconds)
-        await event.reply("▶️ **Melanjutkan Tugas Harian Terjadwal...**")
-        is_first_run = True # Reset agar pesan "melanjutkan dengan..." tidak muncul di akun pertama
+        try:
+            await event.reply(final_summary_text, reply_to=start_message_id)
+        except Exception as e:
+            print(f"[ERROR] Gagal mengirim laporan akhir gabungan: {e}")
 
-    # Simpan semua log yang terkumpul ke file riwayat
-    append_logs_to_history(history_path, all_history_logs)
-    
-    # Kirim laporan akhir gabungan setelah semua proses selesai
-    elapsed_time = datetime.now() - start_time
-    final_summary_text = (
-        f"📊 **--- Laporan Akhir Gabungan ---** 📊\n\n"
-        f"**Akun yang Digunakan:** {', '.join(f'`{s}`' for s in accounts_used)}\n\n"
-        f"--- **Hasil Total** ---\n"
-        f"✅ **Sukses (Tambah/Undang):** {total_stats['added']}\n"
-        f"🔗 **Link Terkirim:** {total_stats['link_sent']}\n"
-        f"⏩ **Dilewati (Privasi):** {total_stats['skipped_privacy']}\n"
-        f"👥 **Sudah Jadi Anggota:** {total_stats['already_member']}\n"
-        f"❌ **Gagal:** {total_stats['failed']} (termasuk bot, error, & limit)\n\n"
-        f"⏱️ **Total Durasi Seluruh Tugas:** {str(elapsed_time).split('.')[0]}"
-    )
-    try:
-        await event.reply(final_summary_text, reply_to=start_message_id)
     except Exception as e:
-        print(f"[ERROR] Gagal mengirim laporan akhir gabungan: {e}")
+        await event.reply(f"❌ Terjadi error tak terduga dalam tugas pool: `{e}`")
+        traceback.print_exc()
+    finally:
+        # Pastikan tugas pool dihapus dari state saat selesai atau error
+        if pool_task_id in TASK_STATE:
+            del TASK_STATE[pool_task_id]
 
 @bot_client.on(events.NewMessage(pattern=r'/addgrup (.*)'))
 async def addgrup_handler(event):
@@ -1621,7 +1655,7 @@ async def status_handler(event):
     message = "⚙️ **Status Proses yang Sedang Berjalan:**\n\n"
     for session, data in running_tasks.items():
         task_name = data.get('task_name', 'Tidak diketahui')
-        message += f"🔹 Akun: `{session}` | Tugas: `{task_name}`\n"
+        message += f"🔹 **Tugas:** `{task_name}` (ID: `{session}`)\n"
     await event.reply(message)
 
 @bot_client.on(events.NewMessage(pattern=r'/stop(?: (\w+))?'))
