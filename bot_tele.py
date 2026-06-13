@@ -167,6 +167,8 @@ async def add_user_to_group(user_client, target_group, user_id, user_username=No
             return False, "PRIVACY_RESTRICTED" # Kode terpadu untuk semua jenis privasi
         elif "users_too_much" in error_msg: # Error saat akun sudah terlalu banyak mengundang
             return False, "INVITE_LIMIT_REACHED" # Kode untuk limit undangan akun
+        elif "chat_member_add_failed" in error_msg:
+            return False, "ADD_MEMBER_FAILED" # Error umum dari Telegram saat undangan ditolak
         elif "banned from sending messages" in error_msg:
             return False, "BANNED_IN_SUPERGROUP" # Kode untuk akun di-ban dari grup
         elif "could not find the input entity" in error_msg:
@@ -450,6 +452,11 @@ async def run_broadcast(event, user_client, session_name, target_str, delay_minu
                             last_status_text = f"❓ {current_user_display}: Gagal (User tidak dikenal)."
                             status_code = "failed"
                             status_detail = "Entity not found. The adding account may not know this user (not in contacts, no mutual groups)."
+                        elif reason_code == "ADD_MEMBER_FAILED":
+                            stats['failed'] += 1
+                            last_status_text = f"❌ {current_user_display}: Gagal (Telegram menolak)."
+                            status_code = "failed"
+                            status_detail = "Telegram returned a generic CHAT_MEMBER_ADD_FAILED error. This can be due to the user's strict privacy, the user blocking the bot, or Telegram's anti-spam filters."
                         elif reason_code == "USER_IS_BANNED":
                             stats['failed'] += 1
                             last_status_text = f"🚫 {current_user_display}: Gagal (User di-ban dari grup)."
